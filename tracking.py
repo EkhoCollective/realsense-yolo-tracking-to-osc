@@ -11,13 +11,22 @@ import argparse # Add argparse for command-line arguments
 parser = argparse.ArgumentParser(description="YOLOv8 RealSense Tracker")
 parser.add_argument("--ip", default="127.0.0.1", help="OSC server IP")
 parser.add_argument("--port", type=int, default=5005, help="OSC server port")
-parser.add_argument("--height", type=float, default=3.5, help="Camera height in meters")
+parser.add_argument("--height", type=float, default=3.46, help="Camera height in meters")
 parser.add_argument("--offset", type=float, default=0.5, help="Camera X-axis offset in meters")
 parser.add_argument("--conf", type=float, default=0.4, help="YOLO detection confidence threshold")
 parser.add_argument("--no-video", action="store_true", help="Run in headless mode without video output.")
 parser.add_argument("--stillness", type=float, default=5.0, help="How long a person must be still (in seconds)")
+parser.add_argument("--tilt", type=float, default=64.4, help="Camera tilt angle in degrees")
+parser.add_argument("--tolerance", type=int, default=1, help="Grid cell movement tolerance for stillness")
+parser.add_argument("--rgb-exposure", type=int, default=1000, help="RGB camera exposure value (-1 for auto)")
+parser.add_argument("--yaw", type=float, default=10.0, help="Camera yaw angle in degrees (positive = right)")
 args = parser.parse_args()
+MOVEMENT_TOLERANCE = args.tolerance
 
+CAMERA_TILT_DEGREES = args.tilt
+CAMERA_TILT_RADIANS = math.radians(CAMERA_TILT_DEGREES)
+CAMERA_YAW_DEGREES = args.yaw
+CAMERA_YAW_RADIANS = math.radians(CAMERA_YAW_DEGREES)
 
 # --- OSC Configuration ---
 OSC_IP = args.ip
@@ -34,7 +43,7 @@ CAMERA_HEIGHT_M = args.height # 3.5 meters
 CAMERA_X_OFFSET_M = args.offset
 
 # --- Grid Visualization Configuration ---
-GRID_DIM_METERS = 20  # Visualize a 20m x 20m area
+GRID_DIM_METERS = 40  # Visualize a 20m x 20m area
 GRID_PIXELS = 500     # Size of the grid visualization window
 CELL_PIXELS = GRID_PIXELS // GRID_DIM_METERS
 GRID_ORIGIN_OFFSET = GRID_DIM_METERS // 2 # To center (0,0) in the visualization
@@ -45,7 +54,7 @@ config = rs.config()
 
 # Configure the streams for the color and depth camera
 # Choose a lower resolution (640x480) and standard FPS (30) for best performance
-W, H = 640, 480
+W, H = 848, 480
 config.enable_stream(rs.stream.depth, W, H, rs.format.z16, 30)
 config.enable_stream(rs.stream.color, W, H, rs.format.bgr8, 30)
 
@@ -56,7 +65,28 @@ depth_sensor = profile.get_device().first_depth_sensor()
 depth_scale = depth_sensor.get_depth_scale()
 print(f"[INFO] Depth Scale is: {depth_scale}")
 
-# Create an align object
+# --- RGB Exposure Control ---
+color_sensor = None
+for sensor in profile.get_device().query_sensors():
+    if sensor.get_info(rs.camera_info.name) == 'RGB Camera':
+        color_sensor = sensor
+        break
+
+if color_sensor:
+    if args.rgb_exposure >= 0:
+        try:
+            color_sensor.set_option(rs.option.enable_auto_exposure, 0)
+            color_sensor.set_option(rs.option.exposure, args.rgb_exposure)
+            print(f"[INFO] RGB Exposure set to: {args.rgb_exposure}")
+        except Exception as e:
+            print(f"[WARNING] Could not set RGB exposure: {e}")
+    else:
+        color_sensor.set_option(rs.option.enable_auto_exposure, 1)
+        print("[INFO] RGB auto exposure enabled.")
+else:
+    print("[WARNING] RGB camera not found.")
+
+# --- Create an align object
 # rs.align allows us to align depth frames to color frames
 align_to = rs.stream.color
 align = rs.align(align_to)
@@ -69,23 +99,23 @@ model = YOLO('yolov8n.pt')
 
 # --- Helper function for Grid Visualization ---
 def draw_grid_visualization(occupied_cells):
-    """Creates an image representing the top-down grid view."""
+    """Creates an image representing the top-down grid view centered at (0,0)."""
     grid_img = np.zeros((GRID_PIXELS, GRID_PIXELS, 3), dtype=np.uint8)
     
     # Draw grid lines
     for i in range(1, GRID_DIM_METERS):
         pos = i * CELL_PIXELS
-        # Vertical lines
         cv2.line(grid_img, (pos, 0), (pos, GRID_PIXELS), (40, 40, 40), 1)
-        # Horizontal lines
         cv2.line(grid_img, (0, pos), (GRID_PIXELS, pos), (40, 40, 40), 1)
 
-    # Highlight occupied cells
+    # Center (0,0) in the middle of the grid image
+    center_pixel_x = GRID_PIXELS // 2
+    center_pixel_y = GRID_PIXELS // 2
+
     for x, y in occupied_cells:
         # Translate world coordinates to pixel coordinates
-        # Add offset to handle negative coordinates and center the grid
-        px = (x + GRID_ORIGIN_OFFSET) * CELL_PIXELS
-        py = (y + GRID_ORIGIN_OFFSET) * CELL_PIXELS
+        px = center_pixel_x + x * CELL_PIXELS
+        py = center_pixel_y + y * CELL_PIXELS
 
         # Check if the cell is within the drawable area
         if 0 <= px < GRID_PIXELS and 0 <= py < GRID_PIXELS:
@@ -128,12 +158,13 @@ try:
         # Convert the color frame to a numpy array (OpenCV format)
         color_image = np.asanyarray(color_frame.get_data())
 
+        imgsz = ((W + 31) // 32) * 32  # Ensure width is a multiple of 32
         # Run YOLO tracking on the frame
         results = model.track(
             color_image,
             conf=args.conf,
             classes=[0],      # Track only 'person' class (ID 0)
-            imgsz=W,
+            imgsz=imgsz,
             tracker="bytetrack.yaml",
             persist=True,
             verbose=False
@@ -172,12 +203,25 @@ try:
                         point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], distance_m)
                         
                         # Get coordinates relative to the camera and apply the offset
+                        # Adjust for camera tilt: project the detected point onto the floor plane
+                        # Camera is at height CAMERA_HEIGHT_M, tilted CAMERA_TILT_RADIANS from vertical
+                        # point_3d[2] is the Z (forward) distance from camera, point_3d[1] is Y (vertical)
+                        # We want the horizontal distance from the camera base to the detected point on the floor
+
+                        # Calculate the vertical distance from camera to detected point
+                        vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
+                        # Calculate the horizontal distance using tilt
+                        floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
                         floor_x = point_3d[0] + CAMERA_X_OFFSET_M
-                        floor_y = point_3d[2]
+
+                        # --- Apply yaw rotation ---
+                        # Rotate (floor_x, floor_y) around the camera origin by CAMERA_YAW_RADIANS
+                        rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
+                        rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
 
                         # For visualization, calculate grid position on every frame
-                        grid_x = math.floor(floor_x)
-                        grid_y = math.floor(floor_y)
+                        grid_x = math.floor(rotated_x)
+                        grid_y = math.floor(rotated_y)
                         current_frame_grid_cells.add((grid_x, grid_y))
 
                         # --- Update Person State for Stillness Detection ---
@@ -186,14 +230,23 @@ try:
 
                         if track_id not in person_states:
                             # New person detected
-                            person_states[track_id] = {'current_cell': current_cell, 'still_since': current_time_for_state, 'osc_sent': False}
+                            person_states[track_id] = {
+                                'origin_cell': current_cell,
+                                'current_cell': current_cell,
+                                'still_since': current_time_for_state,
+                                'osc_sent': False
+                            }
                         else:
-                            # Existing person, check if they moved
-                            if person_states[track_id]['current_cell'] != current_cell:
-                                # Person moved to a new cell
-                                person_states[track_id]['current_cell'] = current_cell
+                            # Existing person, check if they moved beyond tolerance
+                            origin_cell = person_states[track_id]['origin_cell']
+                            dx = abs(current_cell[0] - origin_cell[0])
+                            dy = abs(current_cell[1] - origin_cell[1])
+                            if dx > MOVEMENT_TOLERANCE or dy > MOVEMENT_TOLERANCE:
+                                # Person moved outside tolerance, reset origin and timer
+                                person_states[track_id]['origin_cell'] = current_cell
                                 person_states[track_id]['still_since'] = current_time_for_state
                                 person_states[track_id]['osc_sent'] = False
+                            person_states[track_id]['current_cell'] = current_cell
                         
                         # --- Visualization Logic ---
                         is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
@@ -220,12 +273,11 @@ try:
             for track_id, state in person_states.items():
                 # Check if person is still in the frame
                 if track_id in current_frame_ids:
-                    # Check if they have been still for the required duration and we haven't sent a message yet
+                    # Check if they have been still for the required duration
                     is_still_long_enough = (current_time - state['still_since']) > STILLNESS_DURATION
-                    if is_still_long_enough and not state['osc_sent']:
+                    if is_still_long_enough:
                         still_persons_cells.add(state['current_cell'])
-                        state['osc_sent'] = True # Mark as sent
-                
+            
             # Flatten the set of unique cells into a list for OSC
             if still_persons_cells:
                 occupied_grid_cells = [coord for cell in sorted(list(still_persons_cells)) for coord in cell]
