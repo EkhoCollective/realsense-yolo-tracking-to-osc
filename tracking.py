@@ -144,8 +144,8 @@ try:
     while True:
         # Initialize a set for the current frame's grid cells for visualization
         current_frame_grid_cells = set()
-        # New set to hold only the cells of people confirmed to be "still"
-        still_cells_for_viz = set()
+        # Unified set for cells of people confirmed to be "still"
+        still_cells = set()
 
         # Wait for a new set of frames from the camera and align them
         frames = pipeline.wait_for_frames()
@@ -278,12 +278,10 @@ try:
                                     person_states[track_id].pop('sticky_candidate_since', None)
                     person_states[track_id]['current_cell'] = current_cell
                     
-                    # --- Visualization Logic ---
+                    # --- Visualization & Stillness Logic ---
                     is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
-                    
-                    # If person is still, add their sticky cell to the visualization set
                     if is_still:
-                        still_cells_for_viz.add(person_states[track_id]['sticky_cell'])
+                        still_cells.add(person_states[track_id]['sticky_cell'])
 
                     # Draw info on the frame only if window is visible
                     if show_window:
@@ -293,27 +291,15 @@ try:
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
                         cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
 
-        # --- Timed OSC Sending Logic ---
+        # --- Timed OSC Sending & Visualization ---
         current_time = time.time()
         if current_time - last_osc_send_time > OSC_SEND_INTERVAL:
-            still_persons_cells = set()
-
-            # Process the collected states
-            for track_id, state in person_states.items():
-                # Check if person is still in the frame
-                if track_id in current_frame_ids:
-                    # Check if they have been still for the required duration
-                    is_still_long_enough = (current_time - state['still_since']) > STILLNESS_DURATION
-                    if is_still_long_enough:
-                        still_persons_cells.add(state['sticky_cell'])
-            
-            # Flatten the set of unique cells into a list for OSC
-            if still_persons_cells:
-                occupied_grid_cells = [coord for cell in sorted(list(still_persons_cells)) for coord in cell]
+            # Use the unified still_cells set for OSC
+            if still_cells:
+                occupied_grid_cells = [coord for cell in sorted(list(still_cells)) for coord in cell]
                 print(f"[INFO] Sending OSC message for STILL persons: {occupied_grid_cells}")
                 osc_client.send_message(OSC_ADDRESS, occupied_grid_cells)
-
-            # Prune old tracks that are no longer visible
+            # Prune old tracks
             person_states = {tid: state for tid, state in person_states.items() if tid in current_frame_ids}
             last_osc_send_time = current_time
 
@@ -323,7 +309,7 @@ try:
             cv2.imshow(window_name, annotated_frame)
             
             # Create and display the grid visualization using ONLY the still cells
-            grid_image = draw_grid_visualization(still_cells_for_viz)
+            grid_image = draw_grid_visualization(still_cells)
             cv2.imshow(grid_window_name, grid_image)
 
             # Check if window was closed by clicking the 'X'
