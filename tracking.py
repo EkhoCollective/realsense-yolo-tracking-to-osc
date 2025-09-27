@@ -115,7 +115,7 @@ def draw_grid_visualization(occupied_cells):
     for x, y in occupied_cells:
         # Translate world coordinates to pixel coordinates
         px = center_pixel_x + x * CELL_PIXELS
-        py = center_pixel_y + y * CELL_PIXELS
+        py = center_pixel_y - y * CELL_PIXELS  # Flip Y axis
 
         # Check if the cell is within the drawable area
         if 0 <= px < GRID_PIXELS and 0 <= py < GRID_PIXELS:
@@ -134,6 +134,9 @@ person_states = {}
 show_window = not args.no_video
 window_name = "YOLOv8 ByteTrack on RealSense"
 grid_window_name = "Occupancy Grid"
+
+# --- Tracking Loop ---
+STICKY_CELL_DURATION = 1.0  # seconds a person must stay in a new cell before updating
 
 try:
     while True:
@@ -233,6 +236,8 @@ try:
                             person_states[track_id] = {
                                 'origin_cell': current_cell,
                                 'current_cell': current_cell,
+                                'sticky_cell': current_cell,
+                                'sticky_since': current_time_for_state,
                                 'still_since': current_time_for_state,
                                 'osc_sent': False
                             }
@@ -246,23 +251,45 @@ try:
                                 person_states[track_id]['origin_cell'] = current_cell
                                 person_states[track_id]['still_since'] = current_time_for_state
                                 person_states[track_id]['osc_sent'] = False
-                            person_states[track_id]['current_cell'] = current_cell
-                        
-                        # --- Visualization Logic ---
-                        is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
-                        
-                        # If person is still, add their cell to the visualization set
-                        if is_still:
-                            still_cells_for_viz.add(current_cell)
+                                # Also update sticky cell immediately
+                                person_states[track_id]['sticky_cell'] = current_cell
+                                person_states[track_id]['sticky_since'] = current_time_for_state
+                            else:
+                                # If within tolerance, check if they've stayed in a new cell long enough
+                                if current_cell != person_states[track_id]['sticky_cell']:
+                                    # Entered a new adjacent cell
+                                    if person_states[track_id].get('sticky_candidate') == current_cell:
+                                        # Already tracking this candidate cell
+                                        if current_time_for_state - person_states[track_id].get('sticky_candidate_since', current_time_for_state) > STICKY_CELL_DURATION:
+                                            # Stayed long enough, update sticky cell
+                                            person_states[track_id]['sticky_cell'] = current_cell
+                                            person_states[track_id]['sticky_since'] = current_time_for_state
+                                            person_states[track_id].pop('sticky_candidate', None)
+                                            person_states[track_id].pop('sticky_candidate_since', None)
+                                    else:
+                                        # Start tracking candidate cell
+                                        person_states[track_id]['sticky_candidate'] = current_cell
+                                        person_states[track_id]['sticky_candidate_since'] = current_time_for_state
+                                else:
+                                    # Reset candidate if back to sticky cell
+                                    person_states[track_id].pop('sticky_candidate', None)
+                                    person_states[track_id].pop('sticky_candidate_since', None)
+                    person_states[track_id]['current_cell'] = current_cell
+                    
+                    # --- Visualization Logic ---
+                    is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
+                    
+                    # If person is still, add their sticky cell to the visualization set
+                    if is_still:
+                        still_cells_for_viz.add(person_states[track_id]['sticky_cell'])
 
-                        # Draw info on the frame only if window is visible
-                        if show_window:
-                            # Green for still, yellow for moving
-                            viz_color = (0, 255, 0) if is_still else (0, 255, 255)
-                            label = f"ID {track_id}: ({grid_x}, {grid_y}) @ {distance_m:.2f}m"
-                            cv2.putText(annotated_frame, label, (x1, y1 - 10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
-                            cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
+                    # Draw info on the frame only if window is visible
+                    if show_window:
+                        viz_color = (0, 255, 0) if is_still else (0, 255, 255)
+                        label = f"ID {track_id}: ({grid_x}, {grid_y}) @ {distance_m:.2f}m"
+                        cv2.putText(annotated_frame, label, (x1, y1 - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
+                        cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
 
         # --- Timed OSC Sending Logic ---
         current_time = time.time()
@@ -276,7 +303,7 @@ try:
                     # Check if they have been still for the required duration
                     is_still_long_enough = (current_time - state['still_since']) > STILLNESS_DURATION
                     if is_still_long_enough:
-                        still_persons_cells.add(state['current_cell'])
+                        still_persons_cells.add(state['sticky_cell'])
             
             # Flatten the set of unique cells into a list for OSC
             if still_persons_cells:

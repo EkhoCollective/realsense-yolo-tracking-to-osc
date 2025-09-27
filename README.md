@@ -2,22 +2,17 @@
 
 This project implements a YOLOv8 RealSense Tracker using Intel RealSense cameras and the YOLOv8 model for object detection. The tracker identifies and tracks people in a specified area, sending occupancy data via OSC (Open Sound Control).
 
-## Project Structure
-
-- `tracking.py`: Contains the main logic for the YOLOv8 RealSense Tracker, including argument parsing, camera setup, model initialization, tracking loop, and OSC communication.
-- `Dockerfile`: Defines the environment for the application, specifying the base image, dependencies, and commands to run the application.
-- `requirements.txt`: Lists the Python dependencies required for the project.
-- `README.md`: Documentation for the project, including setup instructions and usage.
-
 ## Setup Instructions
 
 1. **Clone the Repository**
+
    ```bash
    git clone https://github.com/EkhoCollective/realsense-yolo-tracking-to-osc.git
    cd realsense-yolo-tracking-to-osc
    ```
 
 2. **Build the Docker Image**
+Note that USB passthrough may require additional configuration on Windows hosts.
    ```bash
    docker build -t realsense-tracking-osc .
    ```
