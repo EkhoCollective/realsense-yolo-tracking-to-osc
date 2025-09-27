@@ -2,7 +2,7 @@
 
 This project implements a YOLOv8 RealSense Tracker using Intel RealSense cameras and the YOLOv8 model for object detection. The tracker identifies and tracks people in a specified area, sending occupancy data via OSC (Open Sound Control).
 
-## Setup Instructions
+## Local Setup Instructions
 
 1. **Clone the Repository**
 
@@ -11,13 +11,25 @@ This project implements a YOLOv8 RealSense Tracker using Intel RealSense cameras
    cd realsense-yolo-tracking-to-osc
    ```
 
-2. **Build the Docker Image**
+2. **If running locally, install requirements**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Run with Python**
+   ```bash
+   python tracking.py
+   ```
+
+## Docker Setup Instructions
+
+1. **Build the Docker Image**
 Note that USB passthrough may require additional configuration on Windows hosts.
    ```bash
    docker build -t realsense-tracking-osc .
    ```
 
-3. **Run the Docker Container**
+2. **Run the Docker Container**
    ```bash
    docker run --rm -it realsense-tracking-osc
    ```
@@ -37,22 +49,8 @@ To run the tracker, you can specify various command-line arguments. Here are som
 - `--tolerance`: Grid cell movement tolerance for stillness (default: `1`)
 - `--rgb-exposure`: RGB camera exposure value (-1 for auto, default: `1000`)
 - `--yaw`: Camera yaw angle in degrees (positive = right, default: `10.0`)
-
-## Dependencies
-
-The project requires the following Python packages:
-
-- `opencv-python`
-- `numpy`
-- `pyrealsense2`
-- `ultralytics`
-- `python-osc`
-
-You can install these dependencies using:
-
-```bash
-pip install -r requirements.txt
-```
+- `--rs-width`: RealSense stream width in pixels (default: `640`)
+- `--rs-height`: RealSense stream height in pixels (default: `480`)
 
 ## License
 
