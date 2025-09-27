@@ -1,0 +1,10 @@
+# Ultralytics YOLOv8 ByteTrack tracker settings
+tracker_type: bytetrack
+
+# ByteTrack settings
+track_high_thresh: 0.5  # High-confidence detection threshold
+track_low_thresh: 0.1   # Low-confidence detection threshold
+new_track_thresh: 0.6   # Threshold for creating new tracks
+track_buffer: 30        # Number of frames to buffer when a track is lost
+match_thresh: 0.8       # IOU threshold for matching
+fuse_score: false       # Add this line
