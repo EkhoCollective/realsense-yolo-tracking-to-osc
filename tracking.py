@@ -20,6 +20,8 @@ parser.add_argument("--tilt", type=float, default=64.4, help="Camera tilt angle 
 parser.add_argument("--tolerance", type=int, default=1, help="Grid cell movement tolerance for stillness")
 parser.add_argument("--rgb-exposure", type=int, default=1000, help="RGB camera exposure value (-1 for auto)")
 parser.add_argument("--yaw", type=float, default=10.0, help="Camera yaw angle in degrees (positive = right)")
+parser.add_argument("--rs-width", type=int, default=640, help="RealSense stream width in pixels")
+parser.add_argument("--rs-height", type=int, default=480, help="RealSense stream height in pixels")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -54,7 +56,7 @@ config = rs.config()
 
 # Configure the streams for the color and depth camera
 # Choose a lower resolution (640x480) and standard FPS (30) for best performance
-W, H = 848, 480
+W, H = args.rs_width, args.rs_height
 config.enable_stream(rs.stream.depth, W, H, rs.format.z16, 30)
 config.enable_stream(rs.stream.color, W, H, rs.format.bgr8, 30)
 
