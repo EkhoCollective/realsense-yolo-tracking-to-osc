@@ -372,17 +372,47 @@ aligned_frames = align.process(frames)
 depth_frame = aligned_frames.get_depth_frame()
 depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
 
-# Sample a dense wall curve (200 points)
-dense_wall_curve, _ = sample_furthest_points(
+# --- Sample a dense wall curve (200 points) ---
+dense_wall_curve, dense_wall_pixels = sample_furthest_points(
     depth_frame, depth_intrinsics, num_points=200, sampling_height=args.sampling_height
 )
 
-# Divide the wall into equal-length segments
+# --- Divide the wall into equal-length segments ---
 WALL_SEGMENTS = compute_equal_segments(dense_wall_curve, NUM_SEGMENTS)
 
-print("[INFO] Wall segments (equal length) frozen for tracking.")
+# --- Map each dense measurement point to its segment ---
+def assign_points_to_segments(dense_curve, segments):
+    """Returns a list mapping each dense point index to its closest segment index."""
+    mapping = []
+    for wx, wy in dense_curve:
+        min_dist = float('inf')
+        min_idx = 0
+        for idx, (sx, sy) in enumerate(segments):
+            if sx is None or sy is None or wx is None or wy is None:
+                continue
+            dist = math.hypot(wx - sx, wy - sy)
+            if dist < min_dist:
+                min_dist = dist
+                min_idx = idx
+        mapping.append(min_idx)
+    return mapping
 
-# --- 3. Tracking Loop ---
+DENSE_POINT_TO_SEGMENT = assign_points_to_segments(dense_wall_curve, WALL_SEGMENTS)
+
+# --- Helper: Find nearest dense measurement point ---
+def nearest_dense_point_idx(px, py, dense_curve):
+    min_dist = float('inf')
+    min_idx = 0
+    for idx, (wx, wy) in enumerate(dense_curve):
+        if wx is None or wy is None:
+            continue
+        dist = math.hypot(px - wx, py - wy)
+        if dist < min_dist:
+            min_dist = dist
+            min_idx = idx
+    return min_idx
+
+# --- Tracking Loop ---
 # Variables for timed OSC sending
 last_osc_send_time = time.time()
 # New dictionary to track the state of each person
@@ -486,8 +516,11 @@ try:
             for idx, (px, py) in enumerate(WALL_SEGMENT_PIXELS):
                 if px is not None and py is not None:
                     if idx in still_segments:
-                        cv2.circle(annotated_frame, (px, py), 8, (0, 255, 0), 2)  # Green for still person
+                        # Activated measurement point: bright green, larger
+                        cv2.circle(annotated_frame, (px, py), 14, (0, 255, 0), -1)  # Filled bright green
+                        cv2.circle(annotated_frame, (px, py), 18, (0, 255, 255), 2) # Yellow outline for glow effect
                     else:
+                        # Normal measurement point: red, smaller
                         cv2.circle(annotated_frame, (px, py), 8, (0, 0, 255), 2)  # Red for normal
         else:
             annotated_frame = color_image 
@@ -538,13 +571,9 @@ try:
                         grid_y = math.floor(rotated_y)
                         current_frame_grid_cells.add((grid_x, grid_y))
 
-                        # --- Wall segment calculation ---
-                        wall_idx = closest_wall_segment(rotated_x, rotated_y)
-
-                        # Heuristic: Use opposite wall segment if projection is longer on that side
-                        projection_wall_idx = wall_idx
-                        if wall_idx <= WALL_IDX_OFFSET:
-                            projection_wall_idx = NUM_SEGMENTS - wall_idx - 1
+                        # --- Wall segment calculation using nearest measurement point ---
+                        dense_idx = nearest_dense_point_idx(rotated_x, rotated_y, dense_wall_curve)
+                        segment_idx = DENSE_POINT_TO_SEGMENT[dense_idx]
 
                         # --- Update Person State for Stillness Detection ---
                         current_cell = (grid_x, grid_y)
@@ -598,7 +627,7 @@ try:
                         # --- Visualization & Stillness Logic ---
                         is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
                         if is_still:
-                            still_segments.add(projection_wall_idx)
+                            still_segments.add(segment_idx)
                             still_cells.add(current_cell)
 
                         # Draw info on the frame only if window is visible
