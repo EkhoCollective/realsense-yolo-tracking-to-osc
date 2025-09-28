@@ -614,7 +614,11 @@ try:
                                 'sticky_cell': current_cell,
                                 'sticky_since': current_time_for_state,
                                 'still_since': current_time_for_state,
-                                'osc_sent': False
+                                'osc_sent': False,
+                                # Wall segment stickiness
+                                'segment': closest_segment_idx,
+                                'segment_candidate': closest_segment_idx,
+                                'segment_candidate_since': current_time_for_state
                             }
                         else:
                             # Existing person, check if they moved beyond tolerance
@@ -651,19 +655,38 @@ try:
                                     person_states[track_id].pop('sticky_candidate_since', None)
                         person_states[track_id]['current_cell'] = current_cell
                         
-                        # --- Visualization & Stillness Logic ---
-                        is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
-                        if is_still:
-                            still_segments.add(closest_segment_idx)
-                            still_cells.add(current_cell)
+                        # --- Wall segment stickiness logic ---
+                        prev_segment = person_states[track_id]['segment']
+                        if closest_segment_idx != prev_segment:
+                            # Candidate for segment change
+                            if person_states[track_id]['segment_candidate'] == closest_segment_idx:
+                                # Already tracking this candidate
+                                if current_time_for_state - person_states[track_id]['segment_candidate_since'] > STICKY_CELL_DURATION:
+                                    # Stayed long enough, update segment
+                                    person_states[track_id]['segment'] = closest_segment_idx
+                                    person_states[track_id]['segment_candidate_since'] = current_time_for_state
+                            else:
+                                # New candidate segment
+                                person_states[track_id]['segment_candidate'] = closest_segment_idx
+                                person_states[track_id]['segment_candidate_since'] = current_time_for_state
+                        else:
+                            # Reset candidate if back to previous segment
+                            person_states[track_id]['segment_candidate'] = closest_segment_idx
+                            person_states[track_id]['segment_candidate_since'] = current_time_for_state
 
-                        # Draw info on the frame only if window is visible
-                        if show_window:
-                            viz_color = (0, 255, 0) if is_still else (0, 255, 255)
-                            label = f"ID {track_id}: seg {closest_segment_idx+1} @ {distance_m:.2f}m"
-                            cv2.putText(annotated_frame, label, (x1, y1 - 10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
-                            cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
+        # --- Visualization & Stillness Logic ---
+        is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
+        if is_still:
+            still_segments.add(person_states[track_id]['segment'])
+            still_cells.add(current_cell)
+
+        # Draw info on the frame only if window is visible
+        if show_window:
+            viz_color = (0, 255, 0) if is_still else (0, 255, 255)
+            label = f"ID {track_id}: seg {closest_segment_idx+1} @ {distance_m:.2f}m"
+            cv2.putText(annotated_frame, label, (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
+            cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
 
         # --- Timed OSC Sending & Visualization ---
         current_time = time.time()
