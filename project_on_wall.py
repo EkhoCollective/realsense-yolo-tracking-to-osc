@@ -22,7 +22,7 @@ parser.add_argument("--rgb-exposure", type=int, default=1000, help="RGB camera e
 parser.add_argument("--yaw", type=float, default=-0, help="Camera yaw angle in degrees (positive = right)")
 parser.add_argument("--rs-width", type=int, default=640, help="RealSense stream width in pixels")
 parser.add_argument("--rs-height", type=int, default=480, help="RealSense stream height in pixels")
-parser.add_argument("--wall-idx-offset", type=int, default=3, help="Threshold for using opposite wall segment for projection")
+parser.add_argument("--wall-idx-offset", type=int, default=2, help="Threshold for using opposite wall segment for projection")
 parser.add_argument("--extra-wall", type=float, default=1.0, help="Extra wall length (in meters) to add to the longer end of the segmented wall")
 parser.add_argument("--num-segments", type=int, default=11, help="Number of wall segments for tracking")
 parser.add_argument("--projection_width", type=int, default=4800, help="Resolution width for wall projection")
@@ -633,7 +633,7 @@ try:
                         # Draw info on the frame only if window is visible
                         if show_window:
                             viz_color = (0, 255, 0) if is_still else (0, 255, 255)
-                            label = f"ID {track_id}: seg {wall_idx+1} @ {distance_m:.2f}m"
+                            label = f"ID {track_id}: seg {segment_idx+1} @ {distance_m:.2f}m"
                             cv2.putText(annotated_frame, label, (x1, y1 - 10),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
                             cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
