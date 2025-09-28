@@ -24,6 +24,10 @@ parser.add_argument("--rs-width", type=int, default=640, help="RealSense stream 
 parser.add_argument("--rs-height", type=int, default=480, help="RealSense stream height in pixels")
 parser.add_argument("--wall-idx-offset", type=int, default=3, help="Threshold for using opposite wall segment for projection")
 parser.add_argument("--extra-wall", type=float, default=1.0, help="Extra wall length (in meters) to add to the longer end of the segmented wall")
+parser.add_argument("--num-segments", type=int, default=11, help="Number of wall segments for tracking")
+parser.add_argument("--projection_width", type=int, default=4800, help="Resolution width for wall projection")
+parser.add_argument("--projection_height", type=int, default=1200, help="Resolution height for wall projection")
+parser.add_argument("--sampling_height", type=float, default=0.25, help="Relative height (0.0-1.0) for wall segment sampling (0=top, 1=bottom)")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -143,7 +147,7 @@ def draw_grid_visualization(occupied_cells):
 
 # --- Wall Definition ---
 # Wall: straight from (-3, 11) to (-3, 12.5), then quadratic curve to (0, 14)
-NUM_SEGMENTS = 11
+NUM_SEGMENTS = args.num_segments
 
 def sample_wall_curve(depth_frame, depth_intrinsics, num_points=200):
     """Samples depth along a line in the image to estimate the wall curve."""
@@ -213,27 +217,24 @@ def sample_room_edges(depth_frame, depth_intrinsics, num_points=11):
 
     return wall_curve
 
-def sample_furthest_points(depth_frame, depth_intrinsics, num_points=20):
-    """Samples the furthest valid depth points across the image width to estimate room boundary."""
+def sample_furthest_points(depth_frame, depth_intrinsics, num_points=20, sampling_height=0.25):
+    """Samples the furthest valid depth points across the image width at a specific row."""
     img_w = depth_intrinsics.width
     img_h = depth_intrinsics.height
+    y = int(img_h * sampling_height)
     wall_curve = []
+    wall_pixels = []
     for i in range(num_points):
         x = int((img_w - 1) * (i / (num_points - 1)))
-        max_depth = 0
-        max_y = None
-        # Scan from top to bottom for furthest valid depth
-        for y in range(img_h):
-            depth = depth_frame.get_distance(x, y)
-            if 0 < depth < 10 and depth > max_depth:
-                max_depth = depth
-                max_y = y
-        if max_depth > 0 and max_y is not None:
-            pt_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x, max_y], max_depth)
+        depth = depth_frame.get_distance(x, y)
+        if 0 < depth < 10:
+            pt_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x, y], depth)
             wall_curve.append((pt_3d[0] + CAMERA_X_OFFSET_M, pt_3d[2]))
+            wall_pixels.append((x, y))
         else:
             wall_curve.append((None, None))
-    return wall_curve
+            wall_pixels.append((None, None))
+    return wall_curve, wall_pixels
 
 def closest_wall_segment(px, py):
     """Returns the index of the closest valid wall segment to (px, py)."""
@@ -249,42 +250,54 @@ def closest_wall_segment(px, py):
     return min_idx
 
 def draw_wall_visualization(occupied_segments):
-    """Draws a horizontal row of 11 rectangles, highlighting occupied segments."""
-    width = 440
+    """Draws a horizontal row of rectangles for wall segments after wall-idx-offset, highlighting occupied segments."""
+    start_idx = WALL_IDX_OFFSET + 1
+    num_display_segments = NUM_SEGMENTS - start_idx
+    width = args.projection_width
     height = 40
-    seg_w = width // NUM_SEGMENTS
+    seg_w = width // num_display_segments if num_display_segments > 0 else width
     img = np.zeros((height, width, 3), dtype=np.uint8)
-    for i in range(NUM_SEGMENTS):
-        color = (0, 255, 0) if i in occupied_segments else (40, 40, 40)
+    for i in range(num_display_segments):
+        seg_idx = start_idx + i
+        color = (0, 255, 0) if seg_idx in occupied_segments else (40, 40, 40)
         cv2.rectangle(img, (i * seg_w, 0), ((i + 1) * seg_w - 2, height - 2), color, -1)
-        cv2.putText(img, str(i + 1), (i * seg_w + 10, height // 2 + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+        cv2.putText(img, str(seg_idx + 1), (i * seg_w + 10, height // 2 + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
     return img
 
-def average_wall_curve(pipeline, align, num_points=20, sample_duration=5.0):
+def average_wall_curve(pipeline, align, num_points=20, sample_duration=5.0, sampling_height=0.25):
     """Samples the furthest wall points for sample_duration seconds and averages them."""
     print("[INFO] Sampling wall segments for averaging...")
     start_time = time.time()
     samples = [[] for _ in range(num_points)]
+    pixel_samples = [[] for _ in range(num_points)]
     while time.time() - start_time < sample_duration:
         frames = pipeline.wait_for_frames()
         aligned_frames = align.process(frames)
         depth_frame = aligned_frames.get_depth_frame()
         depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
-        wall_curve = sample_furthest_points(depth_frame, depth_intrinsics, num_points)
-        for i, (wx, wy) in enumerate(wall_curve):
+        wall_curve, wall_pixels = sample_furthest_points(depth_frame, depth_intrinsics, num_points, sampling_height)
+        for i, ((wx, wy), (px, py)) in enumerate(zip(wall_curve, wall_pixels)):
             if wx is not None and wy is not None:
                 samples[i].append((wx, wy))
-    # Average valid samples for each segment
+            if px is not None and py is not None:
+                pixel_samples[i].append((px, py))
     averaged_curve = []
-    for seg_samples in samples:
+    averaged_pixels = []
+    for seg_samples, pix_samples in zip(samples, pixel_samples):
         if seg_samples:
             avg_x = sum(x for x, y in seg_samples) / len(seg_samples)
             avg_y = sum(y for x, y in seg_samples) / len(seg_samples)
             averaged_curve.append((avg_x, avg_y))
         else:
             averaged_curve.append((None, None))
+        if pix_samples:
+            avg_px = int(sum(x for x, y in pix_samples) / len(pix_samples))
+            avg_py = int(sum(y for x, y in pix_samples) / len(pix_samples))
+            averaged_pixels.append((avg_px, avg_py))
+        else:
+            averaged_pixels.append((None, None))
     print("[INFO] Wall segments averaged and frozen for tracking.")
-    return averaged_curve
+    return averaged_curve, averaged_pixels
 
 # --- 3. Tracking Loop ---
 # Variables for timed OSC sending
@@ -339,7 +352,9 @@ aligned_frames = align.process(frames)
 depth_frame = aligned_frames.get_depth_frame()
 depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
 
-WALL_SEGMENTS = average_wall_curve(pipeline, align, NUM_SEGMENTS, sample_duration=5.0)
+WALL_SEGMENTS, WALL_SEGMENT_PIXELS = average_wall_curve(
+    pipeline, align, NUM_SEGMENTS, sample_duration=5.0, sampling_height=args.sampling_height
+)
 WALL_SEGMENTS = extend_wall_curve(WALL_SEGMENTS, EXTRA_WALL)
 print("[INFO] Wall segments frozen for tracking.")
 
@@ -384,8 +399,11 @@ try:
         # This part runs only if the window is supposed to be shown
         if show_window:
             annotated_frame = results[0].plot()
+            # Highlight wall segment pixels
+            for px, py in WALL_SEGMENT_PIXELS:
+                if px is not None and py is not None:
+                    cv2.circle(annotated_frame, (px, py), 8, (0, 0, 255), 2)  # Red circles
         else:
-            # We still need color_image for the key press handling loop
             annotated_frame = color_image 
 
         # Get a set of all IDs present in the current frame
