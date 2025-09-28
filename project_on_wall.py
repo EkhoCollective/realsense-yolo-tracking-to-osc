@@ -217,20 +217,30 @@ def sample_room_edges(depth_frame, depth_intrinsics, num_points=11):
 
     return wall_curve
 
-def sample_furthest_points(depth_frame, depth_intrinsics, num_points=20, sampling_height=0.25):
-    """Samples the furthest valid depth points across the image width at a specific row."""
+def sample_wall_vertical_lines(depth_frame, depth_intrinsics, num_lines=20, min_height=0.1, max_height=0.9, samples_per_line=30):
+    """
+    Samples vertical lines across the image width.
+    For each line (column), checks multiple heights and picks the furthest valid depth.
+    """
     img_w = depth_intrinsics.width
     img_h = depth_intrinsics.height
-    y = int(img_h * sampling_height)
     wall_curve = []
     wall_pixels = []
-    for i in range(num_points):
-        x = int((img_w - 1) * (i / (num_points - 1)))
-        depth = depth_frame.get_distance(x, y)
-        if 0 < depth < 10:
-            pt_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x, y], depth)
+    for i in range(num_lines):
+        x = int((img_w - 1) * (i / (num_lines - 1)))
+        max_depth = 0
+        best_y = None
+        for j in range(samples_per_line):
+            frac = min_height + (max_height - min_height) * (j / (samples_per_line - 1))
+            y = int(img_h * frac)
+            depth = depth_frame.get_distance(x, y)
+            if 0 < depth < 10 and depth > max_depth:
+                max_depth = depth
+                best_y = y
+        if max_depth > 0 and best_y is not None:
+            pt_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x, best_y], max_depth)
             wall_curve.append((pt_3d[0] + CAMERA_X_OFFSET_M, pt_3d[2]))
-            wall_pixels.append((x, y))
+            wall_pixels.append((x, best_y))
         else:
             wall_curve.append((None, None))
             wall_pixels.append((None, None))
@@ -250,42 +260,27 @@ def closest_wall_segment(px, py):
     return min_idx
 
 def draw_wall_visualization(occupied_segments):
-    """Draws rectangles for wall segments, width proportional to measured distance."""
-    start_idx = WALL_IDX_OFFSET + 1
+    """Draws rectangles for wall segments, all with equal pixel width."""
+    start_idx = WALL_IDX_OFFSET
     num_display_segments = NUM_SEGMENTS - start_idx
     width = args.projection_width
     height = 40
 
-    # Calculate segment distances
-    segment_distances = []
-    total_distance = 0
-    for i in range(start_idx, len(WALL_SEGMENTS) - 1):
-        wx1, wy1 = WALL_SEGMENTS[i]
-        wx2, wy2 = WALL_SEGMENTS[i + 1]
-        if None in (wx1, wy1, wx2, wy2):
-            dist = 0
-        else:
-            dist = math.hypot(wx2 - wx1, wy2 - wy1)
-        segment_distances.append(dist)
-        total_distance += dist
-
-    # Avoid division by zero
-    if total_distance == 0:
-        segment_distances = [1] * num_display_segments
-        total_distance = num_display_segments
-
-    # Calculate pixel widths for each segment
-    segment_pixel_widths = [int(width * (d / total_distance)) for d in segment_distances]
+    # Calculate equal pixel width for each segment
+    if num_display_segments > 0:
+        segment_pixel_width = width // num_display_segments
+    else:
+        segment_pixel_width = width
 
     img = np.zeros((height, width, 3), dtype=np.uint8)
     x_offset = 0
-    for i, seg_w in enumerate(segment_pixel_widths):
+    for i in range(num_display_segments):
         seg_idx = start_idx + i
         color = (0, 255, 0) if seg_idx in occupied_segments else (40, 40, 40)
-        cv2.rectangle(img, (x_offset, 0), (x_offset + seg_w - 2, height - 2), color, -1)
+        cv2.rectangle(img, (x_offset, 0), (x_offset + segment_pixel_width - 2, height - 2), color, -1)
         cv2.putText(img, str(seg_idx + 1), (x_offset + 10, height // 2 + 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-        x_offset += seg_w
+        x_offset += segment_pixel_width
     return img
 
 def average_wall_curve(pipeline, align, num_points=20, sample_duration=5.0, sampling_height=0.25):
@@ -299,7 +294,7 @@ def average_wall_curve(pipeline, align, num_points=20, sample_duration=5.0, samp
         aligned_frames = align.process(frames)
         depth_frame = aligned_frames.get_depth_frame()
         depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
-        wall_curve, wall_pixels = sample_furthest_points(depth_frame, depth_intrinsics, num_points, sampling_height)
+        wall_curve, wall_pixels = sample_wall_vertical_lines(depth_frame, depth_intrinsics, num_points, sampling_height)
         for i, ((wx, wy), (px, py)) in enumerate(zip(wall_curve, wall_pixels)):
             if wx is not None and wy is not None:
                 samples[i].append((wx, wy))
@@ -373,12 +368,26 @@ depth_frame = aligned_frames.get_depth_frame()
 depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
 
 # --- Sample a dense wall curve (200 points) ---
-dense_wall_curve, dense_wall_pixels = sample_furthest_points(
-    depth_frame, depth_intrinsics, num_points=200, sampling_height=args.sampling_height
+dense_wall_curve, dense_wall_pixels = sample_wall_vertical_lines(
+    depth_frame, depth_intrinsics, num_lines=200, min_height=args.sampling_height, max_height=args.sampling_height
 )
 
 # --- Divide the wall into equal-length segments ---
 WALL_SEGMENTS = compute_equal_segments(dense_wall_curve, NUM_SEGMENTS)
+
+
+
+def get_vertical_line_depths(depth_frame, x, y_start, y_end=0):
+    """
+    Returns a list of (y, depth) for all pixels in column x from y_start up to y_end (exclusive).
+    y_start should be the wall segment pixel's y value, y_end is typically 0 (top of image).
+    """
+    depths = []
+    for y in range(y_start, y_end - 1, -1):  # Go upwards
+        depth = depth_frame.get_distance(x, y)
+        depths.append((y, depth))
+    return depths
+
 
 # --- Map each dense measurement point to its segment ---
 def assign_points_to_segments(dense_curve, segments):
@@ -459,6 +468,29 @@ def extend_wall_curve(wall_curve, extra_length=1.0):
     extended.append(extra_point)
     return extended
 
+
+def get_vertical_line_world_points(depth_frame, depth_intrinsics, x, y_start, y_end=0):
+    """
+    Returns a list of (X, Y, Z) world coordinates for all pixels in column x from y_start up to y_end (exclusive).
+    Applies camera tilt and yaw corrections.
+    """
+    points = []
+    for y in range(y_start, y_end - 1, -1):  # Go upwards
+        depth = depth_frame.get_distance(x, y)
+        if 0 < depth < 10:
+            pt_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x, y], depth)
+            # Apply camera offset
+            pt_3d[0] += CAMERA_X_OFFSET_M
+            # Project onto floor plane using tilt
+            vertical_distance = CAMERA_HEIGHT_M - pt_3d[1]
+            floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + pt_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+            floor_x = pt_3d[0]
+            # Apply yaw rotation
+            rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
+            rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
+            points.append((rotated_x, rotated_y))
+    return points
+
 # --- Sample and average wall curve BEFORE tracking loop ---
 frames = pipeline.wait_for_frames()
 aligned_frames = align.process(frames)
@@ -512,66 +544,50 @@ try:
         # This part runs only if the window is supposed to be shown
         if show_window:
             annotated_frame = results[0].plot()
-            # Highlight wall segment pixels
-            for idx, (px, py) in enumerate(WALL_SEGMENT_PIXELS):
+            # --- Draw vertical sampling lines and reference verticals ---
+            for px, py in WALL_SEGMENT_PIXELS:
                 if px is not None and py is not None:
+                    # Draw a vertical line at each sampled column
+                    cv2.line(annotated_frame, (px, 0), (px, annotated_frame.shape[0]), (0, 180, 255), 1)
+                    # Draw the sampled point as before
+                    cv2.circle(annotated_frame, (px, py), 6, (255, 0, 0), 2)
+                    # Highlight active segments
+                    idx = WALL_SEGMENT_PIXELS.index((px, py))
                     if idx in still_segments:
-                        # Activated measurement point: bright green, larger
-                        cv2.circle(annotated_frame, (px, py), 14, (0, 255, 0), -1)  # Filled bright green
-                        cv2.circle(annotated_frame, (px, py), 18, (0, 255, 255), 2) # Yellow outline for glow effect
+                        cv2.circle(annotated_frame, (px, py), 14, (0, 255, 0), -1)
+                        cv2.circle(annotated_frame, (px, py), 18, (0, 255, 255), 2)
                     else:
-                        # Normal measurement point: red, smaller
-                        cv2.circle(annotated_frame, (px, py), 8, (0, 0, 255), 2)  # Red for normal
-        else:
-            annotated_frame = color_image 
+                        cv2.circle(annotated_frame, (px, py), 8, (0, 0, 255), 2)
+                    # --- Draw all points above the wall segment pixel ---
+                    vertical_depths = get_vertical_line_depths(depth_frame, px, py)
+                    for y, depth in vertical_depths:
+                        if 0 < depth < 10:
+                            cv2.circle(annotated_frame, (px, y), 2, (0, 255, 255), -1)  # Yellow dots for reference line
+                    annotated_frame = color_image 
 
         # Get a set of all IDs present in the current frame
         current_frame_ids = set()
         if results[0].boxes.id is not None:
             current_frame_ids = set(results[0].boxes.id.cpu().numpy().astype(int))
-
             boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
             ids = results[0].boxes.id.cpu().numpy().astype(int)
             clss = results[0].boxes.cls.cpu().numpy().astype(int)
 
             for box, track_id, cls_id in zip(boxes, ids, clss):
-                # Check if the detected object is a person
                 if model.names[cls_id] == 'person':
                     x1, y1, x2, y2 = box
-                    # Get the center of the bounding box
                     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-
-                    # Get the distance to the center of the bounding box
                     distance_m = depth_frame.get_distance(cx, cy)
-
-                    # If a valid distance is found
-                    if 0 < distance_m < 10: # Check for a reasonable distance
-                        # Deproject 2D pixel to 3D point in camera coordinates
+                    if 0 < distance_m < 10:
                         point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], distance_m)
-                        
-                        # Get coordinates relative to the camera and apply the offset
-                        # Adjust for camera tilt: project the detected point onto the floor plane
-                        # Camera is at height CAMERA_HEIGHT_M, tilted CAMERA_TILT_RADIANS from vertical
-                        # point_3d[2] is the Z (forward) distance from camera, point_3d[1] is Y (vertical)
-                        # We want the horizontal distance from the camera base to the detected point on the floor
-
-                        # Calculate the vertical distance from camera to detected point
                         vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
-                        # Calculate the horizontal distance using tilt
                         floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
                         floor_x = point_3d[0] + CAMERA_X_OFFSET_M
-
-                        # --- Apply yaw rotation ---
-                        # Rotate (floor_x, floor_y) around the camera origin by CAMERA_YAW_RADIANS
                         rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
                         rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
-
-                        # For visualization, calculate grid position on every frame
                         grid_x = math.floor(rotated_x)
                         grid_y = math.floor(rotated_y)
                         current_frame_grid_cells.add((grid_x, grid_y))
-
-                        # --- Wall segment calculation using nearest measurement point ---
                         dense_idx = nearest_dense_point_idx(rotated_x, rotated_y, dense_wall_curve)
                         segment_idx = DENSE_POINT_TO_SEGMENT[dense_idx]
 
