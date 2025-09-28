@@ -5,7 +5,8 @@ from ultralytics import YOLO
 from pythonosc import udp_client
 import math
 import time # Import the time module
-import argparse # Add argparse for command-line arguments
+import argparse # Add argparse for command-line arguments¨
+import os
 
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser(description="YOLOv8 RealSense Tracker")
@@ -28,6 +29,7 @@ parser.add_argument("--num-segments", type=int, default=11, help="Number of wall
 parser.add_argument("--projection_width", type=int, default=4800, help="Resolution width for wall projection")
 parser.add_argument("--projection_height", type=int, default=1200, help="Resolution height for wall projection")
 parser.add_argument("--sampling_height", type=float, default=0.25, help="Relative height (0.0-1.0) for wall segment sampling (0=top, 1=bottom)")
+parser.add_argument("--calibrate-wall", action="store_true", help="Enable interactive wall calibration mode")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -106,6 +108,8 @@ align = rs.align(align_to)
 
 print("[INFO] Camera ready.")
 
+
+
 # --- 2. Model Initialization ---
 # Load the ultra-efficient YOLOv8-Nano model
 model = YOLO('yolov8n.pt')
@@ -150,6 +154,75 @@ def draw_grid_visualization(occupied_cells):
 # --- Wall Definition ---
 # Wall: straight from (-3, 11) to (-3, 12.5), then quadratic curve to (0, 14)
 NUM_SEGMENTS = args.num_segments
+
+
+def calibrate_wall_points(pipeline, align, avg_duration=1.0):
+    """
+    Interactive calibration: user clicks on wall points in the color image.
+    For each clicked pixel, averages depth over avg_duration seconds.
+    Saves both pixel and world coordinates to wall_calibration.npz.
+    """
+    print("[INFO] Wall calibration mode: Click on wall points. Press 's' to save, 'q' to quit.")
+    clicked_pixels = []
+    world_points = []
+
+    def mouse_callback(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            clicked_pixels.append((x, y))
+            print(f"[INFO] Clicked pixel: ({x}, {y})")
+
+    while True:
+        frames = pipeline.wait_for_frames()
+        aligned_frames = align.process(frames)
+        depth_frame = aligned_frames.get_depth_frame()
+        color_frame = aligned_frames.get_color_frame()
+        if not depth_frame or not color_frame:
+            continue
+        color_image = np.asanyarray(color_frame.get_data())
+        display_img = color_image.copy()
+        for px, py in clicked_pixels:
+            cv2.circle(display_img, (px, py), 8, (0, 0, 255), -1)
+        cv2.imshow("Calibrate Wall", display_img)
+        cv2.setMouseCallback("Calibrate Wall", mouse_callback)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        if key == ord('s'):
+            # For each clicked pixel, average depth over avg_duration seconds
+            depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
+            for px, py in clicked_pixels:
+                depths = []
+                start_time = time.time()
+                while time.time() - start_time < avg_duration:
+                    frames = pipeline.wait_for_frames()
+                    aligned_frames = align.process(frames)
+                    depth_frame = aligned_frames.get_depth_frame()
+                    depth = depth_frame.get_distance(px, py)
+                    if 0 < depth < 10:
+                        depths.append(depth)
+                if depths:
+                    avg_depth = sum(depths) / len(depths)
+                    pt_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [px, py], avg_depth)
+                    pt_3d[0] += CAMERA_X_OFFSET_M
+                    vertical_distance = CAMERA_HEIGHT_M - pt_3d[1]
+                    floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + pt_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+                    floor_x = pt_3d[0]
+                    rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
+                    rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
+                    world_points.append((rotated_x, rotated_y))
+                else:
+                    world_points.append((None, None))
+            np.savez("wall_calibration.npz", pixels=np.array(clicked_pixels), world=np.array(world_points))
+            print(f"[INFO] Saved {len(world_points)} wall points to wall_calibration.npz")
+            break
+    cv2.destroyWindow("Calibrate Wall")
+
+if args.calibrate_wall:
+    calibrate_wall_points(pipeline, align)
+    print("[INFO] Calibration complete. Exiting.")
+    pipeline.stop()
+    cv2.destroyAllWindows()
+    exit(0)
 
 def sample_wall_curve(depth_frame, depth_intrinsics, num_points=200):
     """Samples depth along a line in the image to estimate the wall curve."""
@@ -499,11 +572,19 @@ aligned_frames = align.process(frames)
 depth_frame = aligned_frames.get_depth_frame()
 depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
 
-WALL_SEGMENTS, WALL_SEGMENT_PIXELS = average_wall_curve(
-    pipeline, align, NUM_SEGMENTS, sample_duration=5.0, sampling_height=args.sampling_height
-)
-WALL_SEGMENTS = extend_wall_curve(WALL_SEGMENTS, EXTRA_WALL)
-print("[INFO] Wall segments frozen for tracking.")
+
+if os.path.exists("wall_calibration.npz"):
+    data = np.load("wall_calibration.npz")
+    WALL_SEGMENTS = data["world"]
+    WALL_SEGMENT_PIXELS = data["pixels"].tolist()
+    NUM_SEGMENTS = len(WALL_SEGMENTS)  # Override segment count
+    print(f"[INFO] Loaded {NUM_SEGMENTS} wall calibration points from wall_calibration.npz")
+else:
+    # Fallback: sample and average wall curve as before
+    WALL_SEGMENTS, WALL_SEGMENT_PIXELS = average_wall_curve(
+        pipeline, align, NUM_SEGMENTS, sample_duration=5.0, sampling_height=args.sampling_height
+    )
+    WALL_SEGMENTS = extend_wall_curve(WALL_SEGMENTS, EXTRA_WALL)
 
 # --- Tracking Loop ---
 try:
@@ -547,14 +628,13 @@ try:
         if show_window:
             annotated_frame = results[0].plot()
             # --- Draw vertical sampling lines and reference verticals ---
-            for px, py in WALL_SEGMENT_PIXELS:
+            for idx, (px, py) in enumerate(WALL_SEGMENT_PIXELS):
                 if px is not None and py is not None:
                     # Draw a vertical line at each sampled column
                     cv2.line(annotated_frame, (px, 0), (px, annotated_frame.shape[0]), (0, 180, 255), 1)
                     # Draw the sampled point as before
                     cv2.circle(annotated_frame, (px, py), 6, (255, 0, 0), 2)
                     # Highlight active segments
-                    idx = WALL_SEGMENT_PIXELS.index((px, py))
                     if idx in still_segments:
                         cv2.circle(annotated_frame, (px, py), 14, (0, 255, 0), -1)
                         cv2.circle(annotated_frame, (px, py), 18, (0, 255, 255), 2)
@@ -564,7 +644,7 @@ try:
                     vertical_depths = get_vertical_line_depths(depth_frame, px, py)
                     for y, depth in vertical_depths:
                         if 0 < depth < 10:
-                            cv2.circle(annotated_frame, (px, y), 2, (0, 255, 255), -1)  # Yellow dots for reference line
+                            cv2.circle(annotated_frame, (px, y), 2, (0, 255, 255), -1)  # Yellow dots for reference linene
                     annotated_frame = color_image 
 
         # Get a set of all IDs present in the current frame
