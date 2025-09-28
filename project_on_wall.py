@@ -72,6 +72,8 @@ config.enable_stream(rs.stream.color, W, H, rs.format.bgr8, 30)
 # Start streaming
 print("[INFO] Starting RealSense pipeline...")
 profile = pipeline.start(config)
+threshold_filter = rs.threshold_filter()
+threshold_filter.set_option(rs.option.max_distance, 2.0) # 10 m maximum
 depth_sensor = profile.get_device().first_depth_sensor()
 depth_scale = depth_sensor.get_depth_scale()
 print(f"[INFO] Depth Scale is: {depth_scale}")
@@ -588,8 +590,17 @@ try:
                         grid_x = math.floor(rotated_x)
                         grid_y = math.floor(rotated_y)
                         current_frame_grid_cells.add((grid_x, grid_y))
-                        dense_idx = nearest_dense_point_idx(rotated_x, rotated_y, dense_wall_curve)
-                        segment_idx = DENSE_POINT_TO_SEGMENT[dense_idx]
+
+                        # --- Find closest wall segment and proximity ---
+                        min_dist = float('inf')
+                        closest_segment_idx = None
+                        for idx, (wx, wy) in enumerate(WALL_SEGMENTS):
+                            if wx is None or wy is None:
+                                continue
+                            dist = math.hypot(rotated_x - wx, rotated_y - wy)
+                            if dist < min_dist:
+                                min_dist = dist
+                                closest_segment_idx = idx
 
                         # --- Update Person State for Stillness Detection ---
                         current_cell = (grid_x, grid_y)
@@ -643,13 +654,13 @@ try:
                         # --- Visualization & Stillness Logic ---
                         is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
                         if is_still:
-                            still_segments.add(segment_idx)
+                            still_segments.add(closest_segment_idx)
                             still_cells.add(current_cell)
 
                         # Draw info on the frame only if window is visible
                         if show_window:
                             viz_color = (0, 255, 0) if is_still else (0, 255, 255)
-                            label = f"ID {track_id}: seg {segment_idx+1} @ {distance_m:.2f}m"
+                            label = f"ID {track_id}: seg {closest_segment_idx+1} @ {distance_m:.2f}m"
                             cv2.putText(annotated_frame, label, (x1, y1 - 10),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
                             cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
@@ -657,10 +668,9 @@ try:
         # --- Timed OSC Sending & Visualization ---
         current_time = time.time()
         if current_time - last_osc_send_time > OSC_SEND_INTERVAL:
-            if still_segments:
-                occupied_segments = sorted(list(still_segments))
-                print(f"[INFO] Sending OSC message for STILL persons: {occupied_segments}")
-                osc_client.send_message(OSC_ADDRESS, occupied_segments)
+            osc_list = [1 if idx in still_segments else 0 for idx in range(WALL_IDX_OFFSET, NUM_SEGMENTS)]
+            print(f"[INFO] Sending OSC message: {osc_list}")
+            osc_client.send_message(OSC_ADDRESS, osc_list)
             person_states = {tid: state for tid, state in person_states.items() if tid in current_frame_ids}
             last_osc_send_time = current_time
 
