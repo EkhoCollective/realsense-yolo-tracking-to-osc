@@ -323,6 +323,65 @@ def average_wall_curve(pipeline, align, num_points=20, sample_duration=5.0, samp
     print("[INFO] Wall segments averaged and frozen for tracking.")
     return averaged_curve, averaged_pixels
 
+def compute_equal_segments(wall_curve, num_segments):
+    """Divides the wall curve into num_segments segments of equal length."""
+    # Filter out invalid points
+    valid_points = [pt for pt in wall_curve if pt[0] is not None and pt[1] is not None]
+    if len(valid_points) < 2:
+        return [(None, None)] * num_segments
+
+    # Compute cumulative distances along the curve
+    distances = [0.0]
+    for i in range(1, len(valid_points)):
+        prev = valid_points[i-1]
+        curr = valid_points[i]
+        d = math.hypot(curr[0] - prev[0], curr[1] - prev[1])
+        distances.append(distances[-1] + d)
+    total_length = distances[-1]
+    segment_length = total_length / (num_segments - 1)
+
+    # Find segment points at equal intervals
+    segment_points = []
+    target_dist = 0.0
+    idx = 0
+    for seg in range(num_segments):
+        while idx < len(distances) - 1 and distances[idx] < target_dist:
+            idx += 1
+        if idx == 0:
+            segment_points.append(valid_points[0])
+        else:
+            # Linear interpolation between valid_points[idx-1] and valid_points[idx]
+            prev_pt = valid_points[idx-1]
+            curr_pt = valid_points[idx]
+            prev_dist = distances[idx-1]
+            curr_dist = distances[idx]
+            if curr_dist == prev_dist:
+                interp_pt = curr_pt
+            else:
+                ratio = (target_dist - prev_dist) / (curr_dist - prev_dist)
+                interp_x = prev_pt[0] + ratio * (curr_pt[0] - prev_pt[0])
+                interp_y = prev_pt[1] + ratio * (curr_pt[1] - prev_pt[1])
+                interp_pt = (interp_x, interp_y)
+            segment_points.append(interp_pt)
+        target_dist += segment_length
+    return segment_points
+
+# --- Sample and average wall curve BEFORE tracking loop ---
+frames = pipeline.wait_for_frames()
+aligned_frames = align.process(frames)
+depth_frame = aligned_frames.get_depth_frame()
+depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
+
+# Sample a dense wall curve (200 points)
+dense_wall_curve, _ = sample_furthest_points(
+    depth_frame, depth_intrinsics, num_points=200, sampling_height=args.sampling_height
+)
+
+# Divide the wall into equal-length segments
+WALL_SEGMENTS = compute_equal_segments(dense_wall_curve, NUM_SEGMENTS)
+
+print("[INFO] Wall segments (equal length) frozen for tracking.")
+
 # --- 3. Tracking Loop ---
 # Variables for timed OSC sending
 last_osc_send_time = time.time()
