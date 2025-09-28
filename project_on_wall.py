@@ -250,18 +250,42 @@ def closest_wall_segment(px, py):
     return min_idx
 
 def draw_wall_visualization(occupied_segments):
-    """Draws a horizontal row of rectangles for wall segments after wall-idx-offset, highlighting occupied segments."""
+    """Draws rectangles for wall segments, width proportional to measured distance."""
     start_idx = WALL_IDX_OFFSET + 1
     num_display_segments = NUM_SEGMENTS - start_idx
     width = args.projection_width
     height = 40
-    seg_w = width // num_display_segments if num_display_segments > 0 else width
+
+    # Calculate segment distances
+    segment_distances = []
+    total_distance = 0
+    for i in range(start_idx, len(WALL_SEGMENTS) - 1):
+        wx1, wy1 = WALL_SEGMENTS[i]
+        wx2, wy2 = WALL_SEGMENTS[i + 1]
+        if None in (wx1, wy1, wx2, wy2):
+            dist = 0
+        else:
+            dist = math.hypot(wx2 - wx1, wy2 - wy1)
+        segment_distances.append(dist)
+        total_distance += dist
+
+    # Avoid division by zero
+    if total_distance == 0:
+        segment_distances = [1] * num_display_segments
+        total_distance = num_display_segments
+
+    # Calculate pixel widths for each segment
+    segment_pixel_widths = [int(width * (d / total_distance)) for d in segment_distances]
+
     img = np.zeros((height, width, 3), dtype=np.uint8)
-    for i in range(num_display_segments):
+    x_offset = 0
+    for i, seg_w in enumerate(segment_pixel_widths):
         seg_idx = start_idx + i
         color = (0, 255, 0) if seg_idx in occupied_segments else (40, 40, 40)
-        cv2.rectangle(img, (i * seg_w, 0), ((i + 1) * seg_w - 2, height - 2), color, -1)
-        cv2.putText(img, str(seg_idx + 1), (i * seg_w + 10, height // 2 + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+        cv2.rectangle(img, (x_offset, 0), (x_offset + seg_w - 2, height - 2), color, -1)
+        cv2.putText(img, str(seg_idx + 1), (x_offset + 10, height // 2 + 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+        x_offset += seg_w
     return img
 
 def average_wall_curve(pipeline, align, num_points=20, sample_duration=5.0, sampling_height=0.25):
@@ -400,9 +424,12 @@ try:
         if show_window:
             annotated_frame = results[0].plot()
             # Highlight wall segment pixels
-            for px, py in WALL_SEGMENT_PIXELS:
+            for idx, (px, py) in enumerate(WALL_SEGMENT_PIXELS):
                 if px is not None and py is not None:
-                    cv2.circle(annotated_frame, (px, py), 8, (0, 0, 255), 2)  # Red circles
+                    if idx in still_segments:
+                        cv2.circle(annotated_frame, (px, py), 8, (0, 255, 0), 2)  # Green for still person
+                    else:
+                        cv2.circle(annotated_frame, (px, py), 8, (0, 0, 255), 2)  # Red for normal
         else:
             annotated_frame = color_image 
 
