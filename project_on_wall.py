@@ -535,11 +535,12 @@ try:
 
         # --- Window Display and Control ---
         if show_window:
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.namedWindow("Wall Segments", cv2.WINDOW_NORMAL)
+            cv2.namedWindow("Movement Grid", cv2.WINDOW_NORMAL)
             cv2.imshow(window_name, annotated_frame)
             wall_image = draw_wall_visualization(still_segments)
             cv2.imshow("Wall Segments", wall_image)
-            
-            # --- Visualize only stopped movement ---
             stopped_grid_image = draw_grid_visualization(still_cells)
             cv2.imshow("Movement Grid", stopped_grid_image)
             
