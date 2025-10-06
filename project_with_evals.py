@@ -819,15 +819,12 @@ try:
                             if best_pose_idx is not None:
                                 keypoints = pose_keypoints[best_pose_idx]
                                 try:
-                                    nose_px, nose_py = keypoints[0][:2]
-                                except Exception as e:
-                                    nose_px, nose_py = None, None
-                                    print(f"[WARN] Error extracting nose keypoint for ID {track_id}: {e}")
-                                    closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
-                                if nose_px and nose_py:
                                     facing_vec = get_facing_direction(keypoints, depth_frame, depth_intrinsics)
                                     person_pos = (rotated_x, rotated_y)
                                     closest_segment_idx = is_wall_in_cone(person_pos, facing_vec, WALL_SEGMENTS)
+                                except Exception as e:
+                                    print(f"[WARN] Error computing facing direction for ID {track_id}: {e}")
+                                    closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
                             else:
                                 # Fallback to closest segment if pose not found
                                 closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
