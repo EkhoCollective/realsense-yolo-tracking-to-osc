@@ -876,7 +876,7 @@ try:
                             still_segments.add(person_states[track_id]['segment'])
                             still_cells.add(current_cell)
                         # Draw info on the frame only if window is visible
-                        if show_window:
+                        if show_window and closest_segment_idx is not None:
                             viz_color = (0, 255, 0) if is_still else (0, 255, 255)
                             label = f"ID {track_id}: seg {closest_segment_idx+1} @ {distance_m:.2f}m"
                             cv2.putText(annotated_frame, label, (x1, y1 - 10),
