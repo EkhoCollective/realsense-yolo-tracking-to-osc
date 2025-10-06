@@ -776,18 +776,26 @@ try:
                         grid_x = math.floor(rotated_x)
                         grid_y = math.floor(rotated_y)
                         current_frame_grid_cells.add((grid_x, grid_y))
-
-                        # --- Find closest wall segment and proximity ---
-                        min_dist = float('inf')
-                        closest_segment_idx = None
-                        for idx, (wx, wy) in enumerate(WALL_SEGMENTS):
-                            if wx is None or wy is None:
-                                continue
-                            dist = math.hypot(rotated_x - wx, rotated_y - wy)
-                            if dist < min_dist:
-                                min_dist = dist
-                                closest_segment_idx = idx
-
+                        if args.orientation_tracking and pose_results is not None:
+                            pose_keypoints = pose_results[0].keypoints.xy.cpu().numpy()
+                            best_pose_idx = None
+                            min_nose_dist = float('inf')
+                            for i, kps in enumerate(pose_keypoints):
+                                nose_x, nose_y = kps[0]
+                                dist = math.hypot(cx - nose_x, cy - nose_y)
+                                if dist < min_nose_dist:
+                                    min_nose_dist = dist
+                                    best_pose_idx = i
+                            if best_pose_idx is not None:
+                                keypoints = pose_keypoints[best_pose_idx]
+                                facing_vec = get_facing_direction(keypoints)
+                                person_pos = (rotated_x, rotated_y)
+                                closest_segment_idx = is_wall_in_cone(person_pos, facing_vec, WALL_SEGMENTS)
+                            else:
+                                # Fallback to closest segment if pose not found
+                                closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
+                        else:
+                            closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
                         # --- Update Person State for Stillness Detection ---
                         current_cell = (grid_x, grid_y)
                         current_time_for_state = time.time()
