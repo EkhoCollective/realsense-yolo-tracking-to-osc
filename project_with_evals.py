@@ -34,6 +34,7 @@ parser.add_argument("--calibrate-wall", action="store_true", help="Enable intera
 parser.add_argument("--replay-path", type=str, default=None, help="Folder with recorded RGB/depth frames for replay")
 parser.add_argument("--osc-log", type=str, default=None, help="Path to log OSC output for evaluation")
 parser.add_argument("--orientation-tracking", action="store_true", help="Enable orientation tracking using pose estimation")
+parser.add_argument("--cone-angle", type=float, default=130, help="Cone angle in degrees for orientation-based wall segment assignment")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -141,7 +142,7 @@ def get_facing_direction(keypoints):
         return (0, 1)
     return (dx / norm, dy / norm)
 
-def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=130):
+def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
     """
     Returns the index of the nearest wall segment within the person's cone of vision.
     person_pos: (x, y) in world coordinates
@@ -919,7 +920,7 @@ try:
                             facing_vec = get_facing_direction(keypoints)
                             # --- Visualize cone of vision as triangle ---
                             nose_x, nose_y = keypoints[0]
-                            cone_angle = 130
+                            cone_angle = args.cone_angle  # degrees
                             cone_length = 200  # pixels (adjust as needed)
                             angle_rad = math.atan2(facing_vec[1], facing_vec[0])
                             # Calculate base points
