@@ -929,6 +929,7 @@ try:
             last_osc_send_time = current_time
 
         if args.orientation_tracking and pose_results is not None and show_window:
+            stopped_grid_image = draw_grid_visualization(still_cells)
             pose_keypoints = pose_results[0].keypoints.xy.cpu().numpy()  # shape: (num_poses, 17, 2)
             if results[0].boxes.id is not None:
                 for box, track_id, cls_id in zip(boxes, ids, clss):
@@ -987,7 +988,6 @@ try:
             cv2.imshow(window_name, annotated_frame)
             wall_image = draw_wall_visualization(still_segments)
             cv2.imshow("Wall Segments", wall_image)
-            stopped_grid_image = draw_grid_visualization(still_cells)
             cv2.imshow("Movement Grid", stopped_grid_image)
             
             if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
