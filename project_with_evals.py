@@ -7,6 +7,7 @@ import math
 import time # Import the time module
 import argparse # Add argparse for command-line arguments¨
 import os
+import pandas as pd
 
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser(description="YOLOv8 RealSense Tracker")
@@ -30,6 +31,9 @@ parser.add_argument("--projection_width", type=int, default=4800, help="Resoluti
 parser.add_argument("--projection_height", type=int, default=1200, help="Resolution height for wall projection")
 parser.add_argument("--sampling_height", type=float, default=0.25, help="Relative height (0.0-1.0) for wall segment sampling (0=top, 1=bottom)")
 parser.add_argument("--calibrate-wall", action="store_true", help="Enable interactive wall calibration mode")
+parser.add_argument("--replay-path", type=str, default=None, help="Folder with recorded RGB/depth frames for replay")
+parser.add_argument("--osc-log", type=str, default=None, help="Path to log OSC output for evaluation")
+parser.add_argument("--orientation-tracking", action="store_true", help="Enable orientation tracking using pose estimation")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -64,6 +68,8 @@ WALL_IDX_OFFSET = args.wall_idx_offset
 # --- 1. RealSense Setup ---
 pipeline = rs.pipeline()
 config = rs.config()
+
+start_time = time.time()
 
 # Configure the streams for the color and depth camera
 # Choose a lower resolution (640x480) and standard FPS (30) for best performance
@@ -113,6 +119,53 @@ print("[INFO] Camera ready.")
 # --- 2. Model Initialization ---
 # Load the ultra-efficient YOLOv8-Nano model
 model = YOLO('yolov8n.pt')
+pose_model = None
+if args.orientation_tracking:
+    pose_model = YOLO('yolov8n-pose.pt')
+
+def get_facing_direction(keypoints):
+    """
+    Estimate facing direction (unit vector) from pose keypoints.
+    Uses nose and mid-hip for direction.
+    """
+    # YOLOv8-pose keypoints: [nose, left_eye, right_eye, left_ear, right_ear, left_shoulder, right_shoulder, left_elbow, right_elbow, left_wrist, right_wrist, left_hip, right_hip, left_knee, right_knee, left_ankle, right_ankle]
+    # Use nose and midpoint between left_hip and right_hip
+    nose = keypoints[0][:2]
+    left_hip = keypoints[11][:2]
+    right_hip = keypoints[12][:2]
+    mid_hip = ((left_hip[0] + right_hip[0]) / 2, (left_hip[1] + right_hip[1]) / 2)
+    dx = nose[0] - mid_hip[0]
+    dy = nose[1] - mid_hip[1]
+    norm = math.hypot(dx, dy)
+    if norm == 0:
+        return (0, 1)
+    return (dx / norm, dy / norm)
+
+def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=130):
+    """
+    Returns the index of the nearest wall segment within the person's cone of vision.
+    person_pos: (x, y) in world coordinates
+    facing_vec: (dx, dy) unit vector
+    wall_segments: list of (x, y)
+    cone_angle_deg: cone angle in degrees
+    """
+    cone_angle_rad = math.radians(cone_angle_deg / 2)
+    best_idx = None
+    min_dist = float('inf')
+    for idx, (wx, wy) in enumerate(wall_segments):
+        if wx is None or wy is None:
+            continue
+        vec_to_wall = (wx - person_pos[0], wy - person_pos[1])
+        dist = math.hypot(*vec_to_wall)
+        if dist == 0:
+            continue
+        vec_to_wall_norm = (vec_to_wall[0] / dist, vec_to_wall[1] / dist)
+        dot = facing_vec[0] * vec_to_wall_norm[0] + facing_vec[1] * vec_to_wall_norm[1]
+        angle = math.acos(max(-1, min(1, dot)))
+        if angle < cone_angle_rad and dist < min_dist:
+            min_dist = dist
+            best_idx = idx
+    return best_idx
 
 # --- Helper function for Grid Visualization ---
 def draw_grid_visualization(occupied_cells):
@@ -586,9 +639,57 @@ else:
     )
     WALL_SEGMENTS = extend_wall_curve(WALL_SEGMENTS, EXTRA_WALL)
 
+
+if args.osc_log:
+    osc_log_file = open(args.osc_log, "w")
+    osc_log_file.write("Time_Step," + ",".join(str(i+1) for i in range(NUM_SEGMENTS - WALL_IDX_OFFSET)) + "\n")
+else:
+    osc_log_file = None
 # --- Tracking Loop ---
 try:
+    if args.replay_path:
+        rgb_files = sorted([f for f in os.listdir(args.replay_path) if f.startswith("rgb_") and f.endswith(".png")])
+        depth_files = sorted([f for f in os.listdir(args.replay_path) if f.startswith("depth_") and f.endswith(".npy")])
+        assert len(rgb_files) == len(depth_files), "Mismatch between RGB and depth files!"
+        replay_idx = 0
+
+    def get_next_frame():
+        if args.replay_path:
+            if replay_idx >= len(rgb_files):
+                return None, None
+            rgb_img = cv2.imread(os.path.join(args.replay_path, rgb_files[replay_idx]))
+            depth_img = np.load(os.path.join(args.replay_path, depth_files[replay_idx]))
+            return rgb_img, depth_img
+        else:
+            frames = pipeline.wait_for_frames()
+            aligned_frames = align.process(frames)
+            depth_frame = aligned_frames.get_depth_frame()
+            color_frame = aligned_frames.get_color_frame()
+            if not depth_frame or not color_frame:
+                return None, None
+            color_image = np.asanyarray(color_frame.get_data())
+            depth_image = np.asanyarray(depth_frame.get_data())
+            return color_image, depth_image
+
     while True:
+        if args.replay_path:
+            color_image, depth_image = get_next_frame()
+            if color_image is None or depth_image is None:
+                break
+            replay_idx += 1
+            # You may need to mock depth_frame/color_frame objects if you use RealSense API calls
+            # Otherwise, adapt your code to use numpy arrays directly
+        else:
+            frames = pipeline.wait_for_frames()
+            aligned_frames = align.process(frames)
+            depth_frame = aligned_frames.get_depth_frame()
+            color_frame = aligned_frames.get_color_frame()
+            if not depth_frame or not color_frame:
+                continue
+            color_image = np.asanyarray(color_frame.get_data())
+            depth_image = np.asanyarray(depth_frame.get_data())
+        # ...rest of your tracking code using color_image and depth_image...
+
         # Initialize a set for the current frame's grid cells for visualization
         current_frame_grid_cells = set()
         # Unified set for cells of people confirmed to be "still"
@@ -622,6 +723,11 @@ try:
             persist=True,
             verbose=False
         )
+
+        # If orientation tracking is enabled, run pose estimation
+        pose_results = None
+        if args.orientation_tracking and pose_model is not None:
+            pose_results = pose_model.predict(color_image, conf=args.conf, imgsz=imgsz, verbose=False)
 
         # --- Annotation and Visualization ---
         # This part runs only if the window is supposed to be shown
@@ -775,8 +881,46 @@ try:
             osc_list = [1 if idx in still_segments else 0 for idx in range(WALL_IDX_OFFSET, NUM_SEGMENTS)]
             print(f"[INFO] Sending OSC message: {osc_list}")
             osc_client.send_message(OSC_ADDRESS, osc_list)
+            if osc_log_file:
+                # Calculate elapsed time in seconds since start
+                elapsed_seconds = int(current_time - start_time)
+                timestamp = f"{elapsed_seconds // 60}:{elapsed_seconds % 60:02d}"
+                osc_log_file.write(f"{timestamp}," + ",".join(str(x) for x in osc_list) + "\n")
             person_states = {tid: state for tid, state in person_states.items() if tid in current_frame_ids}
             last_osc_send_time = current_time
+
+        if args.orientation_tracking and pose_results is not None and show_window:
+            pose_keypoints = pose_results[0].keypoints.xy.cpu().numpy()  # shape: (num_poses, 17, 2)
+            for box, track_id, cls_id in zip(boxes, ids, clss):
+                if model.names[cls_id] == 'person':
+                    x1, y1, x2, y2 = box
+                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                    # Find closest pose by nose keypoint
+                    best_pose_idx = None
+                    min_nose_dist = float('inf')
+                    for i, kps in enumerate(pose_keypoints):
+                        nose_x, nose_y = kps[0]  # nose keypoint
+                        dist = math.hypot(cx - nose_x, cy - nose_y)
+                        if dist < min_nose_dist:
+                            min_nose_dist = dist
+                            best_pose_idx = i
+                    if best_pose_idx is not None:
+                        keypoints = pose_keypoints[best_pose_idx]
+                        facing_vec = get_facing_direction(keypoints)
+                        # --- Visualize cone of vision as triangle ---
+                        nose_x, nose_y = keypoints[0]
+                        cone_angle = 130
+                        cone_length = 200  # pixels (adjust as needed)
+                        angle_rad = math.atan2(facing_vec[1], facing_vec[0])
+                        # Calculate base points
+                        left_angle = angle_rad - math.radians(cone_angle / 2)
+                        right_angle = angle_rad + math.radians(cone_angle / 2)
+                        left_x = int(nose_x + cone_length * math.cos(left_angle))
+                        left_y = int(nose_y + cone_length * math.sin(left_angle))
+                        right_x = int(nose_x + cone_length * math.cos(right_angle))
+                        right_y = int(nose_y + cone_length * math.sin(right_angle))
+                        pts = np.array([[int(nose_x), int(nose_y)], [left_x, left_y], [right_x, right_y]], np.int32)
+                        cv2.polylines(annotated_frame, [pts], isClosed=True, color=(255, 200, 0), thickness=2)
 
         # --- Window Display and Control ---
         if show_window:
@@ -802,7 +946,48 @@ try:
             if not show_window:
                 cv2.destroyAllWindows()
 
+
 finally:
     pipeline.stop()
     cv2.destroyAllWindows()
+    if osc_log_file:
+        osc_log_file.close()
     print("[INFO] Pipeline stopped and resources released.")
+
+def seconds_to_mmss(seconds):
+    seconds = float(seconds)
+    m = int(seconds // 60)
+    s = int(seconds % 60)
+    return f"{m}:{s:02d}"
+
+def evaluate_accuracy(osc_log_path, gt_path="Mock_Tracking_File.csv"):
+    if not os.path.exists(osc_log_path) or not os.path.exists(gt_path):
+        print("[WARNING] OSC log or ground truth file not found.")
+        return
+    osc_df = pd.read_csv(osc_log_path).fillna(0)
+    gt_df = pd.read_csv(gt_path).fillna(0)
+    # OSC log already uses MM:SS format for Time_Step
+    osc_df.set_index("Time_Step", inplace=True)
+    gt_df.set_index("Time_Step", inplace=True)
+    common_steps = osc_df.index.intersection(gt_df.index)
+    if len(common_steps) == 0:
+        print("[WARNING] No matching time steps between OSC log and ground truth.")
+        print(f"OSC log steps: {list(osc_df.index)}")
+        print(f"Ground truth steps: {list(gt_df.index)}")
+        return
+    osc_df = osc_df.loc[common_steps]
+    gt_df = gt_df.loc[common_steps]
+    # Align columns
+    common_cols = osc_df.columns.intersection(gt_df.columns)
+    if len(common_cols) == 0:
+        print("[WARNING] No matching columns between OSC log and ground truth.")
+        return
+    osc_arr = osc_df[common_cols].values
+    gt_arr = gt_df[common_cols].values
+    matches = (osc_arr == gt_arr)
+    accuracy = matches.mean() if matches.size > 0 else 0.0
+    print(f"[RESULT] Evaluation accuracy: {accuracy:.3f}")
+
+# After closing osc_log_file
+if args.osc_log:
+    evaluate_accuracy(args.osc_log)
