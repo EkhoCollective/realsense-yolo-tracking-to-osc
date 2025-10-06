@@ -794,6 +794,7 @@ try:
                             else:
                                 # Fallback to closest segment if pose not found
                                 closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
+                                print(f"[WARN] No pose keypoints matched for ID {track_id}, using closest segment.")
                         else:
                             closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
                         # --- Update Person State for Stillness Detection ---
