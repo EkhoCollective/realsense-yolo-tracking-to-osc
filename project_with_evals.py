@@ -22,8 +22,8 @@ parser.add_argument("--tilt", type=float, default=50, help="Camera tilt angle in
 parser.add_argument("--tolerance", type=int, default=1, help="Grid cell movement tolerance for stillness")
 parser.add_argument("--rgb-exposure", type=int, default=1000, help="RGB camera exposure value (-1 for auto)")
 parser.add_argument("--yaw", type=float, default=-0, help="Camera yaw angle in degrees (positive = right)")
-parser.add_argument("--rs-width", type=int, default=640, help="RealSense stream width in pixels")
-parser.add_argument("--rs-height", type=int, default=480, help="RealSense stream height in pixels")
+parser.add_argument("--rs-width", type=int, default=1280, help="RealSense stream width in pixels")
+parser.add_argument("--rs-height", type=int, default=720, help="RealSense stream height in pixels")
 parser.add_argument("--wall-idx-offset", type=int, default=0, help="Threshold for using opposite wall segment for projection")
 parser.add_argument("--extra-wall", type=float, default=0.0, help="Extra wall length (in meters) to add to the longer end of the segmented wall")
 parser.add_argument("--num-segments", type=int, default=11, help="Number of wall segments for tracking")
@@ -74,8 +74,8 @@ start_time = time.time()
 # Configure the streams for the color and depth camera
 # Choose a lower resolution (640x480) and standard FPS (30) for best performance
 W, H = args.rs_width, args.rs_height
-config.enable_stream(rs.stream.depth, W, H, rs.format.z16, 30)
-config.enable_stream(rs.stream.color, W, H, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, W, H, rs.format.z16, 15)
+config.enable_stream(rs.stream.color, W, H, rs.format.bgr8, 15)
 
 # Start streaming
 print("[INFO] Starting RealSense pipeline...")
@@ -891,36 +891,37 @@ try:
 
         if args.orientation_tracking and pose_results is not None and show_window:
             pose_keypoints = pose_results[0].keypoints.xy.cpu().numpy()  # shape: (num_poses, 17, 2)
-            for box, track_id, cls_id in zip(boxes, ids, clss):
-                if model.names[cls_id] == 'person':
-                    x1, y1, x2, y2 = box
-                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                    # Find closest pose by nose keypoint
-                    best_pose_idx = None
-                    min_nose_dist = float('inf')
-                    for i, kps in enumerate(pose_keypoints):
-                        nose_x, nose_y = kps[0]  # nose keypoint
-                        dist = math.hypot(cx - nose_x, cy - nose_y)
-                        if dist < min_nose_dist:
-                            min_nose_dist = dist
-                            best_pose_idx = i
-                    if best_pose_idx is not None:
-                        keypoints = pose_keypoints[best_pose_idx]
-                        facing_vec = get_facing_direction(keypoints)
-                        # --- Visualize cone of vision as triangle ---
-                        nose_x, nose_y = keypoints[0]
-                        cone_angle = 130
-                        cone_length = 200  # pixels (adjust as needed)
-                        angle_rad = math.atan2(facing_vec[1], facing_vec[0])
-                        # Calculate base points
-                        left_angle = angle_rad - math.radians(cone_angle / 2)
-                        right_angle = angle_rad + math.radians(cone_angle / 2)
-                        left_x = int(nose_x + cone_length * math.cos(left_angle))
-                        left_y = int(nose_y + cone_length * math.sin(left_angle))
-                        right_x = int(nose_x + cone_length * math.cos(right_angle))
-                        right_y = int(nose_y + cone_length * math.sin(right_angle))
-                        pts = np.array([[int(nose_x), int(nose_y)], [left_x, left_y], [right_x, right_y]], np.int32)
-                        cv2.polylines(annotated_frame, [pts], isClosed=True, color=(255, 200, 0), thickness=2)
+            if results[0].boxes.id is not None:
+                for box, track_id, cls_id in zip(boxes, ids, clss):
+                    if model.names[cls_id] == 'person':
+                        x1, y1, x2, y2 = box
+                        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                        # Find closest pose by nose keypoint
+                        best_pose_idx = None
+                        min_nose_dist = float('inf')
+                        for i, kps in enumerate(pose_keypoints):
+                            nose_x, nose_y = kps[0]  # nose keypoint
+                            dist = math.hypot(cx - nose_x, cy - nose_y)
+                            if dist < min_nose_dist:
+                                min_nose_dist = dist
+                                best_pose_idx = i
+                        if best_pose_idx is not None:
+                            keypoints = pose_keypoints[best_pose_idx]
+                            facing_vec = get_facing_direction(keypoints)
+                            # --- Visualize cone of vision as triangle ---
+                            nose_x, nose_y = keypoints[0]
+                            cone_angle = 130
+                            cone_length = 200  # pixels (adjust as needed)
+                            angle_rad = math.atan2(facing_vec[1], facing_vec[0])
+                            # Calculate base points
+                            left_angle = angle_rad - math.radians(cone_angle / 2)
+                            right_angle = angle_rad + math.radians(cone_angle / 2)
+                            left_x = int(nose_x + cone_length * math.cos(left_angle))
+                            left_y = int(nose_y + cone_length * math.sin(left_angle))
+                            right_x = int(nose_x + cone_length * math.cos(right_angle))
+                            right_y = int(nose_y + cone_length * math.sin(right_angle))
+                            pts = np.array([[int(nose_x), int(nose_y)], [left_x, left_y], [right_x, right_y]], np.int32)
+                            cv2.polylines(annotated_frame, [pts], isClosed=True, color=(255, 200, 0), thickness=2)
 
         # --- Window Display and Control ---
         if show_window:
