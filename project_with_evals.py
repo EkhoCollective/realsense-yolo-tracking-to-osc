@@ -1005,7 +1005,7 @@ try:
                                 continue
                             # Use world coordinates for cone visualization
                             # Get world position of nose
-                            nose_px, nose_py = keypoints[0][:2]
+                            nose_px, nose_py = keypoints_with_conf[0][:2]
                             nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
                             nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
                             nose_x = nose_3d[0] + CAMERA_X_OFFSET_M
