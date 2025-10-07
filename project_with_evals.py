@@ -801,6 +801,14 @@ try:
         if show_window:
             annotated_frame = results[0].plot()
             # --- Draw vertical sampling lines and reference verticals ---
+            keypoints_data = pose_results[0].keypoints.data.cpu().numpy()
+                
+                # Iterate over each detected person's pose
+            for person_keypoints in keypoints_data:
+                    # Iterate over each keypoint for the person
+                for x, y, conf in person_keypoints:
+                    if conf > 0.5: # Draw only if confidence is above a threshold
+                        cv2.circle(annotated_frame, (int(x), int(y)), 3, (255, 0, 255), -1) # Draw a small magenta circle
             for idx, (px, py) in enumerate(WALL_SEGMENT_PIXELS):
                 if px is not None and py is not None:
                     # Draw a vertical line at each sampled column
