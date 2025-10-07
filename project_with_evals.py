@@ -136,7 +136,7 @@ else:
 def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     """
     Estimate facing direction (unit vector) from pose keypoints in world coordinates.
-    Uses nose and mid-hip for direction, applies camera tilt and yaw.
+    Uses nose and mid-hip for direction.
     """
     # Get pixel coordinates
     nose_px, nose_py = keypoints[0][:2]
@@ -148,30 +148,32 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     # Get depth for each keypoint
     nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
     mid_hip_depth = depth_frame.get_distance(int(mid_hip_px), int(mid_hip_py))
+  
 
     # Convert to world coordinates
     nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
     mid_hip_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [mid_hip_px, mid_hip_py], mid_hip_depth)
 
-    # Apply camera offset
-    nose_3d[0] += CAMERA_X_OFFSET_M
-    mid_hip_3d[0] += CAMERA_X_OFFSET_M
+    # Apply camera offset and rotation if needed (same as for person position)
+    nose_x = nose_3d[0] + CAMERA_X_OFFSET_M
+    nose_y = CAMERA_HEIGHT_M - nose_3d[1]
+    nose_z = nose_3d[2]
+
+    mid_hip_x = mid_hip_3d[0] + CAMERA_X_OFFSET_M
+    mid_hip_y = CAMERA_HEIGHT_M - mid_hip_3d[1]
+    mid_hip_z = mid_hip_3d[2]
 
     # Project onto floor plane using tilt
-    nose_vertical = CAMERA_HEIGHT_M - nose_3d[1]
-    mid_hip_vertical = CAMERA_HEIGHT_M - mid_hip_3d[1]
-    nose_floor_y = nose_vertical * math.tan(CAMERA_TILT_RADIANS) + nose_3d[2] * math.cos(CAMERA_TILT_RADIANS)
-    mid_hip_floor_y = mid_hip_vertical * math.tan(CAMERA_TILT_RADIANS) + mid_hip_3d[2] * math.cos(CAMERA_TILT_RADIANS)
-    nose_floor_x = nose_3d[0]
-    mid_hip_floor_x = mid_hip_3d[0]
+    nose_floor_y = nose_y * math.tan(CAMERA_TILT_RADIANS) + nose_z * math.cos(CAMERA_TILT_RADIANS)
+    mid_hip_floor_y = mid_hip_y * math.tan(CAMERA_TILT_RADIANS) + mid_hip_z * math.cos(CAMERA_TILT_RADIANS)
 
     # Apply yaw rotation
-    nose_rot_x = nose_floor_x * math.cos(CAMERA_YAW_RADIANS) - nose_floor_y * math.sin(CAMERA_YAW_RADIANS)
-    nose_rot_y = nose_floor_x * math.sin(CAMERA_YAW_RADIANS) + nose_floor_y * math.cos(CAMERA_YAW_RADIANS)
-    mid_hip_rot_x = mid_hip_floor_x * math.cos(CAMERA_YAW_RADIANS) - mid_hip_floor_y * math.sin(CAMERA_YAW_RADIANS)
-    mid_hip_rot_y = mid_hip_floor_x * math.sin(CAMERA_YAW_RADIANS) + mid_hip_floor_y * math.cos(CAMERA_YAW_RADIANS)
+    nose_rot_x = nose_x * math.cos(CAMERA_YAW_RADIANS) - nose_floor_y * math.sin(CAMERA_YAW_RADIANS)
+    nose_rot_y = nose_x * math.sin(CAMERA_YAW_RADIANS) + nose_floor_y * math.cos(CAMERA_YAW_RADIANS)
+    mid_hip_rot_x = mid_hip_x * math.cos(CAMERA_YAW_RADIANS) - mid_hip_floor_y * math.sin(CAMERA_YAW_RADIANS)
+    mid_hip_rot_y = mid_hip_x * math.sin(CAMERA_YAW_RADIANS) + mid_hip_floor_y * math.cos(CAMERA_YAW_RADIANS)
 
-    # Facing vector in world coordinates (from mid-hip to nose)
+    # Facing vector in world coordinates
     dx = nose_rot_x - mid_hip_rot_x
     dy = nose_rot_y - mid_hip_rot_y
     norm = math.hypot(dx, dy)
@@ -804,21 +806,7 @@ try:
                     x1, y1, x2, y2 = box
                     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                     distance_m = depth_frame.get_distance(cx, cy)
-                    valid_depth = 0 < distance_m < 10
-                    now = time.time()
-                    # --- Retain last known valid depth ---
-                    if track_id not in person_states:
-                        person_states[track_id] = {
-                            # ...existing fields...
-                            'last_valid_depth': None,
-                            'last_valid_3d_point': None,
-                            'last_valid_time': None,
-                            # ...existing fields...
-                        }
-                    if valid_depth:
-                        point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], distance_m)
-                        person_states[track_id]['last_valid_depth'] = distance_m
-                        person_states[track_id]['last_valid_3d_point'] = point_3d
+                    if 0 < distance_m < 10:
                         point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], distance_m)
                         vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
                         floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
@@ -852,19 +840,6 @@ try:
                                 closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
                                 print(f"[WARN] No pose keypoints matched for ID {track_id}, using closest segment.")
                         else:
-                            last_time = person_states[track_id].get('last_valid_time')
-                            if (
-                                last_time is not None
-                                and (now - last_time) < 5.0
-                                and person_states[track_id].get('last_valid_depth') is not None
-                                and person_states[track_id].get('last_valid_3d_point') is not None
-                            ):
-                                distance_m = person_states[track_id].get('last_valid_depth')
-                                point_3d = person_states[track_id].get('last_valid_3d_point')
-                            else:
-                                continue
-                            if distance_m is None or point_3d is None:
-                                continue  # No valid data, skip this detection
                             closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
                         # --- Update Person State for Stillness Detection ---
                         current_cell = (grid_x, grid_y)
@@ -1031,8 +1006,7 @@ try:
             cv2.imshow(window_name, annotated_frame)
             wall_image = draw_wall_visualization(still_segments)
             cv2.imshow("Wall Segments", wall_image)
-            if args.orientation_tracking:
-                cv2.imshow("Movement Grid", stopped_grid_image)
+            cv2.imshow("Movement Grid", stopped_grid_image)
             
             if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
                 show_window = False
