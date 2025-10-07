@@ -136,25 +136,23 @@ else:
 
 def get_facing_direction(keypoints, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4):
     """
-    Estimate facing direction, with temporal smoothing to prevent 180-degree flips.
+    Estimate facing direction using the shoulder-to-shoulder vector, with temporal smoothing.
     """
-    # Get pixel coordinates
-    nose_px, nose_py = keypoints[0][:2]
-    left_hip_px, left_hip_py = keypoints[11][:2]
-    right_hip_px, right_hip_py = keypoints[12][:2]
-    mid_hip_px = (left_hip_px + right_hip_px) / 2
-    mid_hip_py = (left_hip_py + right_hip_py) / 2
+    # Get pixel coordinates for left and right shoulders
+    left_shoulder_px, left_shoulder_py = keypoints[5][:2]
+    right_shoulder_px, right_shoulder_py = keypoints[6][:2]
 
-    # Get depth for each keypoint
-    nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
-    mid_hip_depth = depth_frame.get_distance(int(mid_hip_px), int(mid_hip_py))
+    # Get depth for each shoulder
+    left_shoulder_depth = depth_frame.get_distance(int(left_shoulder_px), int(left_shoulder_py))
+    right_shoulder_depth = depth_frame.get_distance(int(right_shoulder_px), int(right_shoulder_py))
 
-    if not (nose_depth > 0 and mid_hip_depth > 0):
+    if not (left_shoulder_depth > 0 and right_shoulder_depth > 0):
+        # If either keypoint is invalid, we can't calculate direction
         return (0, 1), prev_vec or (0, 1) # Return default and previous stable vector
 
     # Convert to camera-space 3D coordinates
-    nose_cam = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
-    mid_hip_cam = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [mid_hip_px, mid_hip_py], mid_hip_depth)
+    left_shoulder_cam = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [left_shoulder_px, left_shoulder_py], left_shoulder_depth)
+    right_shoulder_cam = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [right_shoulder_px, right_shoulder_py], right_shoulder_depth)
 
     # Create rotation matrices for tilt (around X-axis) and yaw (around Y-axis)
     cos_t, sin_t = math.cos(-CAMERA_TILT_RADIANS), math.sin(-CAMERA_TILT_RADIANS)
@@ -166,18 +164,19 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics, prev_vec=None
         x2, y2, z2 = x1*cos_y + z1*sin_y, y1, -x1*sin_y + z1*cos_y
         return x2, y2, z2
 
-    nose_rot = rotate_point(nose_cam)
-    mid_hip_rot = rotate_point(mid_hip_cam)
+    left_shoulder_rot = rotate_point(left_shoulder_cam)
+    right_shoulder_rot = rotate_point(right_shoulder_cam)
 
-    # Add camera's own position in the world
-    nose_world_x = nose_rot[0] + CAMERA_X_OFFSET_M
-    nose_world_z = nose_rot[2]
-    mid_hip_world_x = mid_hip_rot[0] + CAMERA_X_OFFSET_M
-    mid_hip_world_z = mid_hip_rot[2]
+    # The shoulder vector in world coordinates (on the XZ floor plane)
+    # This vector points from the person's left to their right.
+    shoulder_vec_x = right_shoulder_rot[0] - left_shoulder_rot[0]
+    shoulder_vec_y = right_shoulder_rot[2] - left_shoulder_rot[2] # World Z is our 'y'
 
-    # Raw facing vector for this frame
-    dx = nose_world_x - mid_hip_world_x
-    dy = nose_world_z - mid_hip_world_z
+    # The facing vector is 90 degrees rotated from the shoulder vector.
+    # Rotating (x, y) by -90 degrees gives (y, -x).
+    dx = shoulder_vec_y
+    dy = -shoulder_vec_x
+    
     norm = math.hypot(dx, dy)
     if norm == 0:
         return (0, 1), prev_vec or (0, 1)
