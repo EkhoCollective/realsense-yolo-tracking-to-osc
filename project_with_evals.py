@@ -134,72 +134,75 @@ else:
         pose_model = YOLO('yolov8l-pose.pt')
 
 
-def get_facing_direction(keypoints, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4):
+def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4, conf_threshold=0.5):
     """
-    Estimate facing direction using the shoulder-to-shoulder vector, with temporal smoothing.
+    Estimate facing direction by projecting the 2D shoulder vector onto the floor plane.
+    This avoids relying on noisy depth differences between shoulders.
     """
-    # Get pixel coordinates for left and right shoulders
-    left_shoulder_px, left_shoulder_py = keypoints[5][:2]
-    right_shoulder_px, right_shoulder_py = keypoints[6][:2]
+    # Get frame dimensions for boundary checks
+    frame_width = depth_intrinsics.width
+    frame_height = depth_intrinsics.height
 
-    # Get depth for each shoulder
-    left_shoulder_depth = depth_frame.get_distance(int(left_shoulder_px), int(left_shoulder_py))
-    right_shoulder_depth = depth_frame.get_distance(int(right_shoulder_px), int(right_shoulder_py))
+    # Get pixel coordinates and confidence for left and right shoulders
+    left_shoulder_px, left_shoulder_py, left_shoulder_conf = keypoints_with_conf[5]
+    right_shoulder_px, right_shoulder_py, right_shoulder_conf = keypoints_with_conf[6]
 
-    if not (left_shoulder_depth > 0 and right_shoulder_depth > 0):
-        # If either keypoint is invalid, we can't calculate direction
-        return (0, 1), prev_vec or (0, 1) # Return default and previous stable vector
+    # --- Confidence Check for Occlusion ---
+    if left_shoulder_conf < conf_threshold or right_shoulder_conf < conf_threshold:
+        return prev_vec or (0, 1), prev_vec or (0, 1)
 
-    # Convert to camera-space 3D coordinates
-    left_shoulder_cam = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [left_shoulder_px, left_shoulder_py], left_shoulder_depth)
-    right_shoulder_cam = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [right_shoulder_px, right_shoulder_py], right_shoulder_depth)
+    # --- Boundary Check ---
+    if not (0 <= left_shoulder_px < frame_width and 0 <= left_shoulder_py < frame_height and
+            0 <= right_shoulder_px < frame_width and 0 <= right_shoulder_py < frame_height):
+        return prev_vec or (0, 1), prev_vec or (0, 1)
 
-    # Create rotation matrices for tilt (around X-axis) and yaw (around Y-axis)
-    cos_t, sin_t = math.cos(-CAMERA_TILT_RADIANS), math.sin(-CAMERA_TILT_RADIANS)
+    # --- Project 2D Shoulder Vector to 3D Floor Plane ---
+    # 1. Get the 2D shoulder vector in pixel coordinates
+    shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
+
+    # 2. Correct for camera tilt. A vector that appears vertical in the image (Y component)
+    # is actually pointing "away" from the camera in the 3D world. We scale this component
+    # by 1/cos(tilt) to project it onto the floor.
+    # The X component is parallel to the floor and needs no scaling.
+    cos_tilt = math.cos(CAMERA_TILT_RADIANS)
+    if cos_tilt == 0: # Avoid division by zero
+        return prev_vec or (0, 1), prev_vec or (0, 1)
+
+    # This is the shoulder vector projected onto the world's XZ plane (our floor grid)
+    shoulder_vec_3d_x = shoulder_vec_px[0]
+    shoulder_vec_3d_z = shoulder_vec_px[1] / cos_tilt
+
+    # 3. The facing vector is perpendicular to the 3D shoulder vector.
+    # Rotating (x, z) by -90 degrees gives (z, -x).
+    dx = shoulder_vec_3d_z
+    dy = -shoulder_vec_3d_x # In our grid, world Z is the 'y' direction
+
+    # 4. Apply camera yaw rotation to the final direction vector
     cos_y, sin_y = math.cos(-CAMERA_YAW_RADIANS), math.sin(-CAMERA_YAW_RADIANS)
+    raw_dx = dx * cos_y - dy * sin_y
+    raw_dy = dx * sin_y + dy * cos_y
 
-    # Function to apply the full 3D rotation
-    def rotate_point(p):
-        x1, y1, z1 = p[0], p[1]*cos_t - p[2]*sin_t, p[1]*sin_t + p[2]*cos_t
-        x2, y2, z2 = x1*cos_y + z1*sin_y, y1, -x1*sin_y + z1*cos_y
-        return x2, y2, z2
-
-    left_shoulder_rot = rotate_point(left_shoulder_cam)
-    right_shoulder_rot = rotate_point(right_shoulder_cam)
-
-    # The shoulder vector in world coordinates (on the XZ floor plane)
-    # This vector points from the person's left to their right.
-    shoulder_vec_x = right_shoulder_rot[0] - left_shoulder_rot[0]
-    shoulder_vec_y = right_shoulder_rot[2] - left_shoulder_rot[2] # World Z is our 'y'
-
-    # The facing vector is 90 degrees rotated from the shoulder vector.
-    # Rotating (x, y) by -90 degrees gives (y, -x).
-    dx = shoulder_vec_y
-    dy = -shoulder_vec_x
-    
-    norm = math.hypot(dx, dy)
+    norm = math.hypot(raw_dx, raw_dy)
     if norm == 0:
-        return (0, 1), prev_vec or (0, 1)
+        return prev_vec or (0, 1), prev_vec or (0, 1)
     
-    raw_vec = (dx / norm, dy / norm)
+    raw_vec = (raw_dx / norm, raw_dy / norm)
 
     # --- Temporal Smoothing ---
     if prev_vec is None:
-        # No previous vector, use the current raw one
         stable_vec = raw_vec
     else:
-        # If the new vector is flipped, reverse it before smoothing
         dot_product = raw_vec[0] * prev_vec[0] + raw_vec[1] * prev_vec[1]
         if dot_product < 0:
             raw_vec = (-raw_vec[0], -raw_vec[1])
-
-        # Weighted average for smoothing
         stable_dx = prev_vec[0] * (1 - smoothing_factor) + raw_vec[0] * smoothing_factor
         stable_dy = prev_vec[1] * (1 - smoothing_factor) + raw_vec[1] * smoothing_factor
         stable_norm = math.hypot(stable_dx, stable_dy)
         stable_vec = (stable_dx / stable_norm, stable_dy / stable_norm)
 
     return raw_vec, stable_vec
+
+    
 
 
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
