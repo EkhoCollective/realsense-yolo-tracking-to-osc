@@ -149,6 +149,8 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     left_shoulder_px, left_shoulder_py, left_shoulder_conf = kps[L_SHOULDER]
     right_shoulder_px, right_shoulder_py, right_shoulder_conf = kps[R_SHOULDER]
     nose_px, nose_py, nose_conf = kps[NOSE]
+    l_eye_px, l_eye_py, l_eye_conf = kps[L_EYE]
+    r_eye_px, r_eye_py, r_eye_conf = kps[R_EYE]
     l_ear_px, l_ear_py, l_ear_conf = kps[L_EAR]
     r_ear_px, r_ear_py, r_ear_conf = kps[R_EAR]
 
@@ -185,7 +187,18 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     else:
         # --- Heuristic 2: Front/Back View using Shoulder Projection ---
         # This part runs if it's not a clear profile view.
-        is_facing_camera = nose_conf > conf_threshold
+        
+        # More robust check for facing camera: are both eyes visible and is the nose between them?
+        is_facing_camera = False
+        if l_eye_conf > conf_threshold and r_eye_conf > conf_threshold and nose_conf > conf_threshold:
+            # Check if nose is horizontally between the eyes
+            eye_min_x = min(l_eye_px, r_eye_px)
+            eye_max_x = max(l_eye_px, r_eye_px)
+            if eye_min_x < nose_px < eye_max_x:
+                is_facing_camera = True
+        else:
+            # Fallback for when eyes are not clear, use nose confidence as a weaker signal
+            is_facing_camera = nose_conf > 0.6 # Use a slightly higher threshold for this fallback
 
         # The potential facing vector is perpendicular to the 3D shoulder vector.
         # Rotating (x, z) by -90 degrees gives (z, -x). This is one possibility.
