@@ -189,13 +189,13 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     # We choose the vector that aligns with our front/back detection.
     if is_facing_camera:
         # Pick the vector that points towards the camera (negative dy)
-        dx, dy = (dx1, dy1) if dy1 > 0 else (dx2, dy2)
+        dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
     else:
         # Pick the vector that points away from the camera (positive dy)
-        dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
+        dx, dy = (dx1, dy1) if dy1 > 0 else (dx2, dy2)
 
     # --- Apply camera yaw and smoothing ---
-    cos_y, sin_y = math.cos(-CAMERA_YAW_RADIANS), math.sin(-CAMERA_YAW_RADIANS)
+    cos_y, sin_y = math.cos(CAMERA_YAW_RADIANS), math.sin(CAMERA_YAW_RADIANS)
     raw_dx = dx * cos_y - dy * sin_y
     raw_dy = dx * sin_y + dy * cos_y
 
