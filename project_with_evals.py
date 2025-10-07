@@ -682,7 +682,7 @@ else:
 
 if args.osc_log:
     osc_log_file = open(args.osc_log, "w")
-    osc_log_file.write("Time_Step," + ",".join(str(i+1) for i in range(NUM_SEGMENTS - WALL_IDX_OFFSET)) + "\n")
+    osc_log_file.write("Frame_Num," + ",".join(str(i+1) for i in range(NUM_SEGMENTS - WALL_IDX_OFFSET)) + "\n")
 else:
     osc_log_file = None
 # --- Tracking Loop ---
@@ -711,11 +711,14 @@ try:
             depth_image = np.asanyarray(depth_frame.get_data())
             return color_image, depth_image
 
+    frame_counter = 0
     while True:
         if args.replay_path:
             color_image, depth_image = get_next_frame()
             if color_image is None or depth_image is None:
                 break
+            else:
+                frame_counter += 1
             replay_idx += 1
             # You may need to mock depth_frame/color_frame objects if you use RealSense API calls
             # Otherwise, adapt your code to use numpy arrays directly
@@ -935,10 +938,7 @@ try:
             print(f"[INFO] Sending OSC message: {osc_list}")
             osc_client.send_message(OSC_ADDRESS, osc_list)
             if osc_log_file:
-                # Calculate elapsed time in seconds since start
-                elapsed_seconds = int(current_time - start_time)
-                timestamp = f"{elapsed_seconds // 60}:{elapsed_seconds % 60:02d}"
-                osc_log_file.write(f"{timestamp}," + ",".join(str(x) for x in osc_list) + "\n")
+                osc_log_file.write(f"{frame_counter}," + ",".join(str(x) for x in osc_list) + "\n")
             person_states = {tid: state for tid, state in person_states.items() if tid in current_frame_ids}
             last_osc_send_time = current_time
 
@@ -1041,14 +1041,14 @@ def evaluate_accuracy(osc_log_path, gt_path="Mock_Tracking_File.csv"):
         return
     osc_df = pd.read_csv(osc_log_path).fillna(0)
     gt_df = pd.read_csv(gt_path).fillna(0)
-    # OSC log already uses MM:SS format for Time_Step
-    osc_df.set_index("Time_Step", inplace=True)
-    gt_df.set_index("Time_Step", inplace=True)
+    # Use Frame_Num as index
+    osc_df.set_index("Frame_Num", inplace=True)
+    gt_df.set_index("Frame_Num", inplace=True)
     common_steps = osc_df.index.intersection(gt_df.index)
     if len(common_steps) == 0:
-        print("[WARNING] No matching time steps between OSC log and ground truth.")
-        print(f"OSC log steps: {list(osc_df.index)}")
-        print(f"Ground truth steps: {list(gt_df.index)}")
+        print("[WARNING] No matching frame numbers between OSC log and ground truth.")
+        print(f"OSC log frames: {list(osc_df.index)}")
+        print(f"Ground truth frames: {list(gt_df.index)}")
         return
     osc_df = osc_df.loc[common_steps]
     gt_df = gt_df.loc[common_steps]
