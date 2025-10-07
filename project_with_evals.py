@@ -133,131 +133,51 @@ else:
         pose_model = YOLO('yolov8l-pose.pt')
 
 
-def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4, conf_threshold=0.5):
+def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     """
-    Estimate facing direction using a combination of shoulder vector and facial keypoint heuristics.
+    Estimate facing direction (unit vector) from pose keypoints in world coordinates.
+    Uses nose and mid-hip for direction, applies camera tilt and yaw.
     """
-    # Keypoint indices
-    NOSE, L_EYE, R_EYE, L_EAR, R_EAR, L_SHOULDER, R_SHOULDER = 0, 1, 2, 3, 4, 5, 6
+    # Get pixel coordinates
+    nose_px, nose_py = keypoints[0][:2]
+    left_hip_px, left_hip_py = keypoints[11][:2]
+    right_hip_px, right_hip_py = keypoints[12][:2]
+    mid_hip_px = (left_hip_px + right_hip_px) / 2
+    mid_hip_py = (left_hip_py + right_hip_py) / 2
 
-    # Get frame dimensions for boundary checks
-    frame_width = depth_intrinsics.width
-    frame_height = depth_intrinsics.height
+    # Get depth for each keypoint
+    nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
+    mid_hip_depth = depth_frame.get_distance(int(mid_hip_px), int(mid_hip_py))
 
-    # Get pixel coordinates and confidence for keypoints
-    kps = keypoints_with_conf
-    left_shoulder_px, left_shoulder_py, left_shoulder_conf = kps[L_SHOULDER]
-    right_shoulder_px, right_shoulder_py, right_shoulder_conf = kps[R_SHOULDER]
-    nose_px, nose_py, nose_conf = kps[NOSE]
-    l_eye_px, l_eye_py, l_eye_conf = kps[L_EYE]
-    r_eye_px, r_eye_py, r_eye_conf = kps[R_EYE]
-    l_ear_px, l_ear_py, l_ear_conf = kps[L_EAR]
-    r_ear_px, r_ear_py, r_ear_conf = kps[R_EAR]
+    # Convert to world coordinates
+    nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
+    mid_hip_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [mid_hip_px, mid_hip_py], mid_hip_depth)
 
-    # --- Confidence Check for core keypoints ---
-    if left_shoulder_conf < conf_threshold or right_shoulder_conf < conf_threshold:
-        return prev_vec or (0, 1), prev_vec or (0, 1)
+    # Apply camera offset
+    nose_3d[0] += CAMERA_X_OFFSET_M
+    mid_hip_3d[0] += CAMERA_X_OFFSET_M
 
-    # --- Boundary Check ---
-    if not (0 <= left_shoulder_px < frame_width and 0 <= left_shoulder_py < frame_height and
-            0 <= right_shoulder_px < frame_width and 0 <= right_shoulder_py < frame_height):
-        return prev_vec or (0, 1), prev_vec or (0, 1)
+    # Project onto floor plane using tilt
+    nose_vertical = CAMERA_HEIGHT_M - nose_3d[1]
+    mid_hip_vertical = CAMERA_HEIGHT_M - mid_hip_3d[1]
+    nose_floor_y = nose_vertical * math.tan(CAMERA_TILT_RADIANS) + nose_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+    mid_hip_floor_y = mid_hip_vertical * math.tan(CAMERA_TILT_RADIANS) + mid_hip_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+    nose_floor_x = nose_3d[0]
+    mid_hip_floor_x = mid_hip_3d[0]
 
-    # --- Calculate the 3D shoulder vector projection first ---
-    cos_tilt = math.cos(CAMERA_TILT_RADIANS)
-    if cos_tilt == 0: return prev_vec or (0, 1), prev_vec or (0, 1)
+    # Apply yaw rotation
+    nose_rot_x = nose_floor_x * math.cos(CAMERA_YAW_RADIANS) - nose_floor_y * math.sin(CAMERA_YAW_RADIANS)
+    nose_rot_y = nose_floor_x * math.sin(CAMERA_YAW_RADIANS) + nose_floor_y * math.cos(CAMERA_YAW_RADIANS)
+    mid_hip_rot_x = mid_hip_floor_x * math.cos(CAMERA_YAW_RADIANS) - mid_hip_floor_y * math.sin(CAMERA_YAW_RADIANS)
+    mid_hip_rot_y = mid_hip_floor_x * math.sin(CAMERA_YAW_RADIANS) + mid_hip_floor_y * math.cos(CAMERA_YAW_RADIANS)
 
-    shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
-    shoulder_vec_3d_x = shoulder_vec_px[0]
-    shoulder_vec_3d_z = shoulder_vec_px[1] / cos_tilt
-
-    # --- Heuristic 1: Profile View (Side View) Detection ---
-    # If one ear is visible and the other isn't, it's a strong sign of a profile view.
-    left_ear_visible = l_ear_conf > conf_threshold
-    right_ear_visible = r_ear_conf > conf_threshold
-
-    if left_ear_visible and not right_ear_visible:
-        # Left ear visible -> person is looking to their left (camera's right).
-        # The raw vector in world space (before yaw) is along the positive X-axis.
-        dx, dy = 1.0, 0.0
-    elif right_ear_visible and not left_ear_visible:
-        # Right ear visible -> person is looking to their right (camera's left).
-        # The raw vector in world space (before yaw) is along the negative X-axis.
-        dx, dy = -1.0, 0.0
-    else:
-        # --- Heuristic 2: Front/Back View using Shoulder Projection ---
-        # This part runs if it's not a clear profile view.
-        
-        # More robust check for facing camera: are both eyes visible and is the nose between them?
-        is_facing_camera = False
-        if l_eye_conf > conf_threshold and r_eye_conf > conf_threshold and nose_conf > conf_threshold:
-            # Check if nose is horizontally between the eyes
-            eye_min_x = min(l_eye_px, r_eye_px)
-            eye_max_x = max(l_eye_px, r_eye_px)
-            if eye_min_x < nose_px < eye_max_x:
-                is_facing_camera = True
-        else:
-            # Fallback for when eyes are not clear, use nose confidence as a weaker signal
-            is_facing_camera = nose_conf > 0.6 # Use a slightly higher threshold for this fallback
-
-        # The potential facing vector is perpendicular to the 3D shoulder vector.
-        # Rotating (x, z) by -90 degrees gives (z, -x). This is one possibility.
-        dx1 = -shoulder_vec_3d_z
-        dy1 = shoulder_vec_3d_x
-        # The other possibility is 180 degrees opposite.
-        dx2 = -dx1
-        dy2 = -dy1
-
-        # --- Robustly determine which vector points towards the camera ---
-        # We use the 2D cross product to determine orientation relative to the camera's origin.
-        # This is more reliable than just checking the sign of dy.
-        # The vector from the camera (0,0) to the shoulder line is not needed, we can
-        # use the shoulder vector (shoulder_vec_3d_x, shoulder_vec_3d_z) itself.
-        # The cross product's sign tells us which perpendicular vector is "inward".
-        cross_product_with_origin = shoulder_vec_3d_x * dy1 - shoulder_vec_3d_z * dx1
-        
-        # Based on the sign, we assign which vector is "towards" and which is "away"
-        if cross_product_with_origin > 0:
-            towards_cam_vec = (dx1, dy1)
-            away_from_cam_vec = (dx2, dy2)
-        else:
-            towards_cam_vec = (dx2, dy2)
-            away_from_cam_vec = (dx1, dy1)
-
-        # We choose the vector that aligns with our front/back detection.
-        if is_facing_camera:
-            dx, dy = towards_cam_vec
-        else:
-            dx, dy = away_from_cam_vec
-
-    # --- Apply camera yaw and smoothing ---
-    cos_y, sin_y = math.cos(CAMERA_YAW_RADIANS), math.sin(CAMERA_YAW_RADIANS)
-    raw_dx = dx * cos_y - dy * sin_y
-    raw_dy = dx * sin_y + dy * cos_y
-
-    norm = math.hypot(raw_dx, raw_dy)
+    # Facing vector in world coordinates (from mid-hip to nose)
+    dx = nose_rot_x - mid_hip_rot_x
+    dy = nose_rot_y - mid_hip_rot_y
+    norm = math.hypot(dx, dy)
     if norm == 0:
-        return prev_vec or (0, 1), prev_vec or (0, 1)
-    
-    raw_vec = (raw_dx / norm, raw_dy / norm)
-
-    # --- Temporal Smoothing ---
-    if prev_vec is None:
-        stable_vec = raw_vec
-    else:
-        # Ensure vectors are in the same general direction before smoothing
-        dot_product = raw_vec[0] * prev_vec[0] + raw_vec[1] * prev_vec[1]
-        if dot_product < -0.5: # Allow for some change, but flip if it's a major reversal
-            # This flip should be very rare with the new heuristics, but kept as a safeguard
-            raw_vec = (-raw_vec[0], -raw_vec[1])
-        
-        stable_dx = prev_vec[0] * (1 - smoothing_factor) + raw_vec[0] * smoothing_factor
-        stable_dy = prev_vec[1] * (1 - smoothing_factor) + raw_vec[1] * smoothing_factor
-        stable_norm = math.hypot(stable_dx, stable_dy)
-        if stable_norm == 0: return prev_vec, prev_vec # Avoid division by zero
-        stable_vec = (stable_dx / stable_norm, stable_dy / stable_norm)
-
-    return raw_vec, stable_vec
+        return (0, 1)
+    return (dx / norm, dy / norm)
 
 
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
@@ -927,7 +847,7 @@ try:
                                     keypoints_with_conf = pose_keypoints_data[best_pose_idx]
                                     try:
                                         prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
-                                        raw_vec, stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
+                                        stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
                                         if track_id in person_states:
                                             person_states[track_id]['facing_vec'] = stable_vec
                                         segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
@@ -1075,7 +995,7 @@ try:
                                 facing_vec = person_states.get(track_id, {}).get('facing_vec')
                                 if facing_vec is None:
                                     # Fallback if not available
-                                    _, facing_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics)
+                                    facing_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics)
                             except Exception as e:
                                 print(f"[ERROR] Facing vector calculation failed: {e}")
                                 continue
