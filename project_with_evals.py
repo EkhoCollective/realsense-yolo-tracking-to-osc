@@ -134,10 +134,9 @@ else:
         pose_model = YOLO('yolov8l-pose.pt')
 
 
-def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
+def get_facing_direction(keypoints, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4):
     """
-    Estimate facing direction (unit vector) from pose keypoints in world coordinates.
-    Uses nose and mid-hip for direction.
+    Estimate facing direction, with temporal smoothing to prevent 180-degree flips.
     """
     # Get pixel coordinates
     nose_px, nose_py = keypoints[0][:2]
@@ -151,8 +150,7 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     mid_hip_depth = depth_frame.get_distance(int(mid_hip_px), int(mid_hip_py))
 
     if not (nose_depth > 0 and mid_hip_depth > 0):
-        # If either keypoint is invalid, we can't calculate direction
-        return (0, 1) # Return a default forward-facing vector
+        return (0, 1), prev_vec or (0, 1) # Return default and previous stable vector
 
     # Convert to camera-space 3D coordinates
     nose_cam = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
@@ -164,30 +162,46 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
 
     # Function to apply the full 3D rotation
     def rotate_point(p):
-        # Tilt rotation (around X)
         x1, y1, z1 = p[0], p[1]*cos_t - p[2]*sin_t, p[1]*sin_t + p[2]*cos_t
-        # Yaw rotation (around Y)
         x2, y2, z2 = x1*cos_y + z1*sin_y, y1, -x1*sin_y + z1*cos_y
         return x2, y2, z2
 
-    # Rotate both points
     nose_rot = rotate_point(nose_cam)
     mid_hip_rot = rotate_point(mid_hip_cam)
 
     # Add camera's own position in the world
     nose_world_x = nose_rot[0] + CAMERA_X_OFFSET_M
     nose_world_z = nose_rot[2]
-
     mid_hip_world_x = mid_hip_rot[0] + CAMERA_X_OFFSET_M
     mid_hip_world_z = mid_hip_rot[2]
 
-    # Facing vector in world coordinates (on the XZ floor plane)
+    # Raw facing vector for this frame
     dx = nose_world_x - mid_hip_world_x
-    dy = nose_world_z - mid_hip_world_z # In our grid, this is the 'y' direction
+    dy = nose_world_z - mid_hip_world_z
     norm = math.hypot(dx, dy)
     if norm == 0:
-        return (0, 1) # Default forward
-    return (dx / norm, dy / norm)
+        return (0, 1), prev_vec or (0, 1)
+    
+    raw_vec = (dx / norm, dy / norm)
+
+    # --- Temporal Smoothing ---
+    if prev_vec is None:
+        # No previous vector, use the current raw one
+        stable_vec = raw_vec
+    else:
+        # If the new vector is flipped, reverse it before smoothing
+        dot_product = raw_vec[0] * prev_vec[0] + raw_vec[1] * prev_vec[1]
+        if dot_product < 0:
+            raw_vec = (-raw_vec[0], -raw_vec[1])
+
+        # Weighted average for smoothing
+        stable_dx = prev_vec[0] * (1 - smoothing_factor) + raw_vec[0] * smoothing_factor
+        stable_dy = prev_vec[1] * (1 - smoothing_factor) + raw_vec[1] * smoothing_factor
+        stable_norm = math.hypot(stable_dx, stable_dy)
+        stable_vec = (stable_dx / stable_norm, stable_dy / stable_norm)
+
+    return raw_vec, stable_vec
+
 
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
     """
@@ -840,9 +854,16 @@ try:
                             if best_pose_idx is not None:
                                 keypoints = pose_keypoints[best_pose_idx]
                                 try:
-                                    facing_vec = get_facing_direction(keypoints, depth_frame, depth_intrinsics)
+                                    # Get previous stable vector from state
+                                    prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
+                                    raw_vec, stable_vec = get_facing_direction(keypoints, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
+                                    
+                                    # Store the new stable vector in the person's state
+                                    if track_id in person_states:
+                                        person_states[track_id]['facing_vec'] = stable_vec
+
                                     person_pos = (rotated_x, rotated_y)
-                                    closest_segment_idx = is_wall_in_cone(person_pos, facing_vec, WALL_SEGMENTS)
+                                    closest_segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
                                 except Exception as e:
                                     print(f"[WARN] Error computing facing direction for ID {track_id}: {e}")
                                     closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
@@ -868,7 +889,9 @@ try:
                                 # Wall segment stickiness
                                 'segment': closest_segment_idx,
                                 'segment_candidate': closest_segment_idx,
-                                'segment_candidate_since': current_time_for_state
+                                'segment_candidate_since': current_time_for_state,
+                                # Orientation tracking
+                                'facing_vec': None 
                             }
                         else:
                             # Existing person, check if they moved beyond tolerance
@@ -969,7 +992,11 @@ try:
                         if best_pose_idx is not None:
                             keypoints = pose_keypoints[best_pose_idx]
                             try:
-                                facing_vec = get_facing_direction(keypoints, depth_frame, depth_intrinsics)
+                                # Use the smoothed vector from the person's state
+                                facing_vec = person_states.get(track_id, {}).get('facing_vec')
+                                if facing_vec is None:
+                                    # Fallback if not available
+                                    _, facing_vec = get_facing_direction(keypoints, depth_frame, depth_intrinsics)
                             except Exception as e:
                                 print(f"[ERROR] Facing vector calculation failed: {e}")
                                 continue
