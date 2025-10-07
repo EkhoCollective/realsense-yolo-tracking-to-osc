@@ -138,7 +138,7 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     Estimate facing direction using a combination of shoulder vector and facial keypoint heuristics.
     """
     # Keypoint indices
-    NOSE, L_SHOULDER, R_SHOULDER = 0, 5, 6
+    NOSE, L_EYE, R_EYE, L_EAR, R_EAR, L_SHOULDER, R_SHOULDER = 0, 1, 2, 3, 4, 5, 6
 
     # Get frame dimensions for boundary checks
     frame_width = depth_intrinsics.width
@@ -149,6 +149,8 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     left_shoulder_px, left_shoulder_py, left_shoulder_conf = kps[L_SHOULDER]
     right_shoulder_px, right_shoulder_py, right_shoulder_conf = kps[R_SHOULDER]
     nose_px, nose_py, nose_conf = kps[NOSE]
+    l_ear_px, l_ear_py, l_ear_conf = kps[L_EAR]
+    r_ear_px, r_ear_py, r_ear_conf = kps[R_EAR]
 
     # --- Confidence Check for core keypoints ---
     if left_shoulder_conf < conf_threshold or right_shoulder_conf < conf_threshold:
@@ -159,20 +161,30 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
             0 <= right_shoulder_px < frame_width and 0 <= right_shoulder_py < frame_height):
         return prev_vec or (0, 1), prev_vec or (0, 1)
 
-    # --- Resolve 180-degree ambiguity using 2D cross product ---
-    # This is the most robust way to determine front/back before projection.
-    is_facing_camera = nose_conf > conf_threshold
+    # --- Heuristic 1: Profile View (Side View) Detection ---
+    # If one ear is visible and the other isn't, it's a strong sign of a profile view.
+    left_ear_visible = l_ear_conf > conf_threshold
+    right_ear_visible = r_ear_conf > conf_threshold
 
-    # --- Project 2D Shoulder Vector to 3D Floor Plane ---
-    shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
+    if left_ear_visible and not right_ear_visible:
+        # Left ear visible -> person is looking to their left (camera's right).
+        # The raw vector in world space (before yaw) is along the positive X-axis.
+        dx, dy = 1.0, 0.0
+    elif right_ear_visible and not left_ear_visible:
+        # Right ear visible -> person is looking to their right (camera's left).
+        # The raw vector in world space (before yaw) is along the negative X-axis.
+        dx, dy = -1.0, 0.0
+    else:
+        # --- Heuristic 2: Front/Back View using Shoulder Projection ---
+        # This part runs if it's not a clear profile view.
+        is_facing_camera = nose_conf > conf_threshold
 
-    # --- Project 2D Shoulder Vector to 3D Floor Plane ---
-    shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
-    cos_tilt = math.cos(CAMERA_TILT_RADIANS)
-    if cos_tilt == 0: return prev_vec or (0, 1), prev_vec or (0, 1)
+        cos_tilt = math.cos(CAMERA_TILT_RADIANS)
+        if cos_tilt == 0: return prev_vec or (0, 1), prev_vec or (0, 1)
 
-    shoulder_vec_3d_x = shoulder_vec_px[0]
-    shoulder_vec_3d_z = shoulder_vec_px[1] / cos_tilt
+        shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
+        shoulder_vec_3d_x = shoulder_vec_px[0]
+        shoulder_vec_3d_z = shoulder_vec_px[1] / cos_tilt
 
     # The potential facing vector is perpendicular to the 3D shoulder vector.
     # Rotating (x, z) by -90 degrees gives (z, -x). This is one possibility.
