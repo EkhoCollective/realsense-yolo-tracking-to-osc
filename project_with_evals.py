@@ -825,8 +825,7 @@ try:
                     vertical_depths = get_vertical_line_depths(depth_frame, px, py)
                     for y, depth in vertical_depths:
                         if 0 < depth < 10:
-                            cv2.circle(annotated_frame, (px, y), 2, (0, 255, 255), -1)  # Yellow dots for reference linene
-                    annotated_frame = color_image 
+                            cv2.circle(annotated_frame, (px, y), 2, (0, 255, 255), -1)  # Yellow dots for reference line
 
         # Get a set of all IDs present in the current frame
         current_frame_ids = set()
