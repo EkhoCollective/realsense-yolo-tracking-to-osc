@@ -136,18 +136,29 @@ else:
 
 def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4, conf_threshold=0.5):
     """
-    Estimate facing direction by projecting the 2D shoulder vector onto the floor plane.
-    This avoids relying on noisy depth differences between shoulders.
+    Estimate facing direction using a combination of shoulder vector and facial keypoint heuristics.
     """
+    # Keypoint indices
+    NOSE, L_EYE, R_EYE, L_EAR, R_EAR, L_SHOULDER, R_SHOULDER, L_HIP, R_HIP = 0, 1, 2, 3, 4, 5, 6, 11, 12
+
     # Get frame dimensions for boundary checks
     frame_width = depth_intrinsics.width
     frame_height = depth_intrinsics.height
 
-    # Get pixel coordinates and confidence for left and right shoulders
-    left_shoulder_px, left_shoulder_py, left_shoulder_conf = keypoints_with_conf[5]
-    right_shoulder_px, right_shoulder_py, right_shoulder_conf = keypoints_with_conf[6]
+    # Get pixel coordinates and confidence for keypoints
+    kps = keypoints_with_conf
+    left_shoulder_px, left_shoulder_py, left_shoulder_conf = kps[L_SHOULDER]
+    right_shoulder_px, right_shoulder_py, right_shoulder_conf = kps[R_SHOULDER]
+    nose_px, _, nose_conf = kps[NOSE]
+    left_ear_px, _, left_ear_conf = kps[L_EAR]
+    right_ear_px, _, right_ear_conf = kps[R_EAR]
+    left_eye_conf = kps[L_EYE][2]
+    right_eye_conf = kps[R_EYE][2]
+    left_hip_conf = kps[L_HIP][2]
+    right_hip_conf = kps[R_HIP][2]
 
-    # --- Confidence Check for Occlusion ---
+
+    # --- Confidence Check for core keypoints ---
     if left_shoulder_conf < conf_threshold or right_shoulder_conf < conf_threshold:
         return prev_vec or (0, 1), prev_vec or (0, 1)
 
@@ -157,27 +168,55 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
         return prev_vec or (0, 1), prev_vec or (0, 1)
 
     # --- Project 2D Shoulder Vector to 3D Floor Plane ---
-    # 1. Get the 2D shoulder vector in pixel coordinates
     shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
-
-    # 2. Correct for camera tilt. A vector that appears vertical in the image (Y component)
-    # is actually pointing "away" from the camera in the 3D world. We scale this component
-    # by 1/cos(tilt) to project it onto the floor.
-    # The X component is parallel to the floor and needs no scaling.
     cos_tilt = math.cos(CAMERA_TILT_RADIANS)
-    if cos_tilt == 0: # Avoid division by zero
-        return prev_vec or (0, 1), prev_vec or (0, 1)
+    if cos_tilt == 0: return prev_vec or (0, 1), prev_vec or (0, 1)
 
-    # This is the shoulder vector projected onto the world's XZ plane (our floor grid)
     shoulder_vec_3d_x = shoulder_vec_px[0]
     shoulder_vec_3d_z = shoulder_vec_px[1] / cos_tilt
 
-    # 3. The facing vector is perpendicular to the 3D shoulder vector.
+    # The potential facing vector is perpendicular to the 3D shoulder vector.
     # Rotating (x, z) by -90 degrees gives (z, -x).
     dx = shoulder_vec_3d_z
-    dy = -shoulder_vec_3d_x # In our grid, world Z is the 'y' direction
+    dy = -shoulder_vec_3d_x
 
-    # 4. Apply camera yaw rotation to the final direction vector
+    # --- Resolve 180-degree ambiguity using keypoint heuristics ---
+    # 1. Determine if person is facing towards or away from the camera.
+    # Higher confidence in facial keypoints suggests facing towards camera.
+    front_score = nose_conf + left_eye_conf + right_eye_conf + left_ear_conf + right_ear_conf
+    back_score = left_shoulder_conf + right_shoulder_conf + left_hip_conf + right_hip_conf
+    is_facing_camera = front_score > back_score
+
+    # 2. Determine left/right turn based on nose position relative to shoulder center.
+    shoulder_center_x = (left_shoulder_px + right_shoulder_px) / 2
+    turn_direction = 0 # 0: straight, >0: turned to their right, <0: turned to their left
+    if nose_conf > conf_threshold:
+        turn_direction = shoulder_center_x - nose_px
+
+    # 3. Correct the facing vector direction.
+    # The "raw" vector (dx, dy) assumes the person is looking "out of the screen".
+    # If they are facing away, we need to flip it.
+    # The sign of dy determines forward/backward in the initial projection.
+    if is_facing_camera:
+        if dy > 0: # Vector is pointing away from camera, which is correct
+            pass
+        else: # Vector is pointing towards camera, flip it
+            dx, dy = -dx, -dy
+    else: # Facing away from camera
+        if dy < 0: # Vector is pointing towards camera, which is correct for a back view
+            pass
+        else: # Vector is pointing away from camera, flip it
+            dx, dy = -dx, -dy
+
+    # 4. Refine based on turn direction. A person turned to their right (turn_direction > 0)
+    # should have a facing vector with a component pointing to the right (positive dx).
+    if abs(turn_direction) > 5: # Add a small threshold
+        if turn_direction > 0 and dx < 0: # Turned right, but vector points left
+            dx = -dx
+        elif turn_direction < 0 and dx > 0: # Turned left, but vector points right
+            dx = -dx
+
+    # --- Apply camera yaw and smoothing ---
     cos_y, sin_y = math.cos(-CAMERA_YAW_RADIANS), math.sin(-CAMERA_YAW_RADIANS)
     raw_dx = dx * cos_y - dy * sin_y
     raw_dy = dx * sin_y + dy * cos_y
@@ -192,12 +231,16 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     if prev_vec is None:
         stable_vec = raw_vec
     else:
+        # Ensure vectors are in the same general direction before smoothing
         dot_product = raw_vec[0] * prev_vec[0] + raw_vec[1] * prev_vec[1]
         if dot_product < 0:
+            # This flip should be rare with the new heuristics, but kept as a safeguard
             raw_vec = (-raw_vec[0], -raw_vec[1])
+        
         stable_dx = prev_vec[0] * (1 - smoothing_factor) + raw_vec[0] * smoothing_factor
         stable_dy = prev_vec[1] * (1 - smoothing_factor) + raw_vec[1] * smoothing_factor
         stable_norm = math.hypot(stable_dx, stable_dy)
+        if stable_norm == 0: return prev_vec, prev_vec # Avoid division by zero
         stable_vec = (stable_dx / stable_norm, stable_dy / stable_norm)
 
     return raw_vec, stable_vec
