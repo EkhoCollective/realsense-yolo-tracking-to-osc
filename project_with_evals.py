@@ -161,6 +161,14 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
             0 <= right_shoulder_px < frame_width and 0 <= right_shoulder_py < frame_height):
         return prev_vec or (0, 1), prev_vec or (0, 1)
 
+    # --- Calculate the 3D shoulder vector projection first ---
+    cos_tilt = math.cos(CAMERA_TILT_RADIANS)
+    if cos_tilt == 0: return prev_vec or (0, 1), prev_vec or (0, 1)
+
+    shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
+    shoulder_vec_3d_x = shoulder_vec_px[0]
+    shoulder_vec_3d_z = shoulder_vec_px[1] / cos_tilt
+
     # --- Heuristic 1: Profile View (Side View) Detection ---
     # If one ear is visible and the other isn't, it's a strong sign of a profile view.
     left_ear_visible = l_ear_conf > conf_threshold
@@ -179,32 +187,25 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
         # This part runs if it's not a clear profile view.
         is_facing_camera = nose_conf > conf_threshold
 
-        cos_tilt = math.cos(CAMERA_TILT_RADIANS)
-        if cos_tilt == 0: return prev_vec or (0, 1), prev_vec or (0, 1)
+        # The potential facing vector is perpendicular to the 3D shoulder vector.
+        # Rotating (x, z) by -90 degrees gives (z, -x). This is one possibility.
+        dx1 = shoulder_vec_3d_z
+        dy1 = -shoulder_vec_3d_x
+        # The other possibility is 180 degrees opposite.
+        dx2 = -dx1
+        dy2 = -dy1
 
-        shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
-        shoulder_vec_3d_x = shoulder_vec_px[0]
-        shoulder_vec_3d_z = shoulder_vec_px[1] / cos_tilt
-
-    # The potential facing vector is perpendicular to the 3D shoulder vector.
-    # Rotating (x, z) by -90 degrees gives (z, -x). This is one possibility.
-    dx1 = shoulder_vec_3d_z
-    dy1 = -shoulder_vec_3d_x
-    # The other possibility is 180 degrees opposite.
-    dx2 = -dx1
-    dy2 = -dy1
-
-    # The vector (dx, dy) represents a direction in the world coordinate system.
-    # dy > 0 means pointing "away" from the camera (further into the scene).
-    # dy < 0 means pointing "towards" the camera.
-    
-    # We choose the vector that aligns with our front/back detection.
-    if is_facing_camera:
-        # Pick the vector that points towards the camera (negative dy)
-        dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
-    else:
-        # Pick the vector that points away from the camera (positive dy)
-        dx, dy = (dx1, dy1) if dy1 > 0 else (dx2, dy2)
+        # The vector (dx, dy) represents a direction in the world coordinate system.
+        # dy > 0 means pointing "away" from the camera (further into the scene).
+        # dy < 0 means pointing "towards" the camera.
+        
+        # We choose the vector that aligns with our front/back detection.
+        if is_facing_camera:
+            # Pick the vector that points towards the camera (negative dy)
+            dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
+        else:
+            # Pick the vector that points away from the camera (positive dy)
+            dx, dy = (dx1, dy1) if dy1 > 0 else (dx2, dy2)
 
     # --- Apply camera yaw and smoothing ---
     cos_y, sin_y = math.cos(CAMERA_YAW_RADIANS), math.sin(CAMERA_YAW_RADIANS)
