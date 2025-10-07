@@ -161,25 +161,10 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
 
     # --- Resolve 180-degree ambiguity using 2D cross product ---
     # This is the most robust way to determine front/back before projection.
-    is_facing_camera = False
-    if nose_conf > conf_threshold:
-        # Vector from left to right shoulder in image space
-        shoulder_vec_2d = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
-        
-        # Vector from shoulder center to nose in image space
-        shoulder_center_px = (left_shoulder_px + right_shoulder_px) / 2
-        shoulder_center_py = (left_shoulder_py + right_shoulder_py) / 2
-        nose_vec_2d = (nose_px - shoulder_center_px, nose_py - shoulder_center_py)
+    is_facing_camera = nose_conf > conf_threshold
 
-        # 2D cross product: shoulder_vec_2d.x * nose_vec_2d.y - shoulder_vec_2d.y * nose_vec_2d.x
-        # If the camera is tilted down, a person facing it will have their nose "above" their shoulders in the image.
-        # This results in a negative cross product.
-        cross_product = shoulder_vec_2d[0] * nose_vec_2d[1] - shoulder_vec_2d[1] * nose_vec_2d[0]
-        
-        # A negative cross product means the nose is "above" the shoulder line relative to its orientation,
-        # which for a downward-tilted camera, means facing towards it.
-        if cross_product < 0:
-            is_facing_camera = True
+    # --- Project 2D Shoulder Vector to 3D Floor Plane ---
+    shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
 
     # --- Project 2D Shoulder Vector to 3D Floor Plane ---
     shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
