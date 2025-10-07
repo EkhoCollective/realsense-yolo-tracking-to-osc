@@ -844,21 +844,21 @@ try:
                         grid_y = math.floor(rotated_y)
                         current_frame_grid_cells.add((grid_x, grid_y))
                         if args.orientation_tracking and pose_results is not None:
-                            pose_keypoints = pose_results[0].keypoints.xy.cpu().numpy()
+                            pose_keypoints_data = pose_results[0].keypoints.data.cpu().numpy() # Use .data to get x,y,conf
                             best_pose_idx = None
                             min_nose_dist = float('inf')
-                            for i, kps in enumerate(pose_keypoints):
-                                nose_x, nose_y = kps[0]
+                            for i, kps in enumerate(pose_keypoints_data):
+                                nose_x, nose_y, _ = kps[0]
                                 dist = math.hypot(cx - nose_x, cy - nose_y)
                                 if dist < min_nose_dist:
                                     min_nose_dist = dist
                                     best_pose_idx = i
                             if best_pose_idx is not None:
-                                keypoints = pose_keypoints[best_pose_idx]
+                                keypoints_with_conf = pose_keypoints_data[best_pose_idx]
                                 try:
                                     # Get previous stable vector from state
                                     prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
-                                    raw_vec, stable_vec = get_facing_direction(keypoints, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
+                                    raw_vec, stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
                                     
                                     # Store the new stable vector in the person's state
                                     if track_id in person_states:
@@ -977,7 +977,8 @@ try:
 
         if args.orientation_tracking and pose_results is not None and show_window:
             stopped_grid_image = draw_grid_visualization(still_cells)
-            pose_keypoints = pose_results[0].keypoints.xy.cpu().numpy()  # shape: (num_poses, 17, 2)
+            pose_keypoints = pose_results[0].keypoints.xy.cpu().numpy()  
+            pose_keypoints_data = pose_results[0].keypoints.data.cpu().numpy()
             if results[0].boxes.id is not None:
                 for box, track_id, cls_id in zip(boxes, ids, clss):
                     if model.names[cls_id] == 'person':
@@ -985,20 +986,20 @@ try:
                         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                         best_pose_idx = None
                         min_nose_dist = float('inf')
-                        for i, kps in enumerate(pose_keypoints):
-                            nose_x, nose_y = kps[0]
+                        for i, kps in enumerate(pose_keypoints_data):
+                            nose_x, nose_y, _ = kps[0]
                             dist = math.hypot(cx - nose_x, cy - nose_y)
                             if dist < min_nose_dist:
                                 min_nose_dist = dist
                                 best_pose_idx = i
                         if best_pose_idx is not None:
-                            keypoints = pose_keypoints[best_pose_idx]
+                            keypoints_with_conf = pose_keypoints_data[best_pose_idx]
                             try:
                                 # Use the smoothed vector from the person's state
                                 facing_vec = person_states.get(track_id, {}).get('facing_vec')
                                 if facing_vec is None:
                                     # Fallback if not available
-                                    _, facing_vec = get_facing_direction(keypoints, depth_frame, depth_intrinsics)
+                                    _, facing_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics)
                             except Exception as e:
                                 print(f"[ERROR] Facing vector calculation failed: {e}")
                                 continue
