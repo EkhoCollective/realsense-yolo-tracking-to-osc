@@ -189,10 +189,10 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     # We choose the vector that aligns with our front/back detection.
     if is_facing_camera:
         # Pick the vector that points towards the camera (negative dy)
-        dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
+        dx, dy = (dx1, dy1) if dy1 > 0 else (dx2, dy2)
     else:
         # Pick the vector that points away from the camera (positive dy)
-        dx, dy = (dx1, dy1) if dy1 > 0 else (dx2, dy2)
+        dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
 
     # --- Apply camera yaw and smoothing ---
     cos_y, sin_y = math.cos(-CAMERA_YAW_RADIANS), math.sin(-CAMERA_YAW_RADIANS)
@@ -1046,6 +1046,11 @@ try:
                             # Use world coordinates for cone visualization
                             # Get world position of nose
                             nose_px, nose_py = keypoints_with_conf[0][:2]
+                            if not (0 <= int(nose_px) < depth_intrinsics.width and 0 <= int(nose_py) < depth_intrinsics.height):
+                                continue # Skip this person's cone visualization if nose is out of bounds
+                            nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
+                            if nose_depth <= 0: # Also check for invalid depth
+                                continue
                             nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
                             nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
                             nose_x = nose_3d[0] + CAMERA_X_OFFSET_M
