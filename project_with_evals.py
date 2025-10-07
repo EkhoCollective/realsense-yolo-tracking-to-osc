@@ -847,7 +847,7 @@ try:
                                     keypoints_with_conf = pose_keypoints_data[best_pose_idx]
                                     try:
                                         prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
-                                        stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
+                                        stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics)
                                         if track_id in person_states:
                                             person_states[track_id]['facing_vec'] = stable_vec
                                         segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
