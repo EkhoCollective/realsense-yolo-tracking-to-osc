@@ -133,6 +133,7 @@ else:
     if args.orientation_tracking:
         pose_model = YOLO('yolov8l-pose.pt')
 
+
 def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     """
     Estimate facing direction (unit vector) from pose keypoints in world coordinates.
@@ -148,38 +149,44 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     # Get depth for each keypoint
     nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
     mid_hip_depth = depth_frame.get_distance(int(mid_hip_px), int(mid_hip_py))
-  
 
-    # Convert to world coordinates
-    nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
-    mid_hip_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [mid_hip_px, mid_hip_py], mid_hip_depth)
+    if not (nose_depth > 0 and mid_hip_depth > 0):
+        # If either keypoint is invalid, we can't calculate direction
+        return (0, 1) # Return a default forward-facing vector
 
-    # Apply camera offset and rotation if needed (same as for person position)
-    nose_x = nose_3d[0] + CAMERA_X_OFFSET_M
-    nose_y = CAMERA_HEIGHT_M - nose_3d[1]
-    nose_z = nose_3d[2]
+    # Convert to camera-space 3D coordinates
+    nose_cam = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
+    mid_hip_cam = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [mid_hip_px, mid_hip_py], mid_hip_depth)
 
-    mid_hip_x = mid_hip_3d[0] + CAMERA_X_OFFSET_M
-    mid_hip_y = CAMERA_HEIGHT_M - mid_hip_3d[1]
-    mid_hip_z = mid_hip_3d[2]
+    # Create rotation matrices for tilt (around X-axis) and yaw (around Y-axis)
+    cos_t, sin_t = math.cos(-CAMERA_TILT_RADIANS), math.sin(-CAMERA_TILT_RADIANS)
+    cos_y, sin_y = math.cos(-CAMERA_YAW_RADIANS), math.sin(-CAMERA_YAW_RADIANS)
 
-    # Project onto floor plane using tilt
-    nose_floor_y = (CAMERA_HEIGHT_M - nose_y) / math.tan(CAMERA_TILT_RADIANS) + nose_z
-    mid_hip_floor_y = (CAMERA_HEIGHT_M - mid_hip_y) / math.tan(CAMERA_TILT_RADIANS) + mid_hip_z
+    # Function to apply the full 3D rotation
+    def rotate_point(p):
+        # Tilt rotation (around X)
+        x1, y1, z1 = p[0], p[1]*cos_t - p[2]*sin_t, p[1]*sin_t + p[2]*cos_t
+        # Yaw rotation (around Y)
+        x2, y2, z2 = x1*cos_y + z1*sin_y, y1, -x1*sin_y + z1*cos_y
+        return x2, y2, z2
 
+    # Rotate both points
+    nose_rot = rotate_point(nose_cam)
+    mid_hip_rot = rotate_point(mid_hip_cam)
 
-    # Apply yaw rotation
-    nose_rot_x = nose_x * math.cos(CAMERA_YAW_RADIANS) - nose_floor_y * math.sin(CAMERA_YAW_RADIANS)
-    nose_rot_y = nose_x * math.sin(CAMERA_YAW_RADIANS) + nose_floor_y * math.cos(CAMERA_YAW_RADIANS)
-    mid_hip_rot_x = mid_hip_x * math.cos(CAMERA_YAW_RADIANS) - mid_hip_floor_y * math.sin(CAMERA_YAW_RADIANS)
-    mid_hip_rot_y = mid_hip_x * math.sin(CAMERA_YAW_RADIANS) + mid_hip_floor_y * math.cos(CAMERA_YAW_RADIANS)
+    # Add camera's own position in the world
+    nose_world_x = nose_rot[0] + CAMERA_X_OFFSET_M
+    nose_world_z = nose_rot[2]
 
-    # Facing vector in world coordinates
-    dx = nose_rot_x - mid_hip_rot_x
-    dy = nose_rot_y - mid_hip_rot_y
+    mid_hip_world_x = mid_hip_rot[0] + CAMERA_X_OFFSET_M
+    mid_hip_world_z = mid_hip_rot[2]
+
+    # Facing vector in world coordinates (on the XZ floor plane)
+    dx = nose_world_x - mid_hip_world_x
+    dy = nose_world_z - mid_hip_world_z # In our grid, this is the 'y' direction
     norm = math.hypot(dx, dy)
     if norm == 0:
-        return (0, 1)
+        return (0, 1) # Default forward
     return (dx / norm, dy / norm)
 
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
