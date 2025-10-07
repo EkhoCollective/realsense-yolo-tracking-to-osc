@@ -135,68 +135,38 @@ else:
 
 def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     """
-    Estimate facing direction (unit vector) from pose keypoints in world coordinates.
-    Uses nose and mid-hip for direction, applies camera tilt and yaw.
-    If nose is not detected or not visible (e.g., facing away), fallback to hips/shoulders.
+    Estimate facing direction (unit vector) from pose keypoints in image coordinates.
+    Uses nose and mid-hip for direction. If nose is not detected, fallback to hips/shoulders.
+    Ignores depth for orientation.
     """
-    # Get pixel coordinates
     nose_px, nose_py = keypoints[0][:2]
     left_hip_px, left_hip_py = keypoints[11][:2]
     right_hip_px, right_hip_py = keypoints[12][:2]
     left_shoulder_px, left_shoulder_py = keypoints[5][:2]
     right_shoulder_px, right_shoulder_py = keypoints[6][:2]
+
+    # Compute mid-hip and mid-shoulder
     mid_hip_px = (left_hip_px + right_hip_px) / 2
     mid_hip_py = (left_hip_py + right_hip_py) / 2
+    mid_shoulder_px = (left_shoulder_px + right_shoulder_px) / 2
+    mid_shoulder_py = (left_shoulder_py + right_shoulder_py) / 2
 
-    # Check if nose is detected (coordinates not zero or nan)
+    # Check if nose is detected
     nose_valid = (
         not (np.isnan(nose_px) or np.isnan(nose_py)) and
         not (nose_px == 0 and nose_py == 0)
     )
-    # Get depth for each keypoint
-    nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py)) if nose_valid else 0
-    mid_hip_depth = depth_frame.get_distance(int(mid_hip_px), int(mid_hip_py))
 
-    # Convert to world coordinates
-    if nose_valid and nose_depth > 0:
-        nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
-    else:
-        nose_3d = None
-    mid_hip_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [mid_hip_px, mid_hip_py], mid_hip_depth)
-
-    # Apply camera offset
-    if nose_3d is not None:
-        nose_3d[0] += CAMERA_X_OFFSET_M
-    mid_hip_3d[0] += CAMERA_X_OFFSET_M
-
-    # Project onto floor plane using tilt
-    if nose_3d is not None:
-        nose_vertical = CAMERA_HEIGHT_M - nose_3d[1]
-        nose_floor_y = nose_vertical * math.tan(CAMERA_TILT_RADIANS) + nose_3d[2] * math.cos(CAMERA_TILT_RADIANS)
-        nose_floor_x = nose_3d[0]
-        # Apply yaw rotation
-        nose_rot_x = nose_floor_x * math.cos(CAMERA_YAW_RADIANS) - nose_floor_y * math.sin(CAMERA_YAW_RADIANS)
-        nose_rot_y = nose_floor_x * math.sin(CAMERA_YAW_RADIANS) + nose_floor_y * math.cos(CAMERA_YAW_RADIANS)
-    else:
-        nose_rot_x = nose_rot_y = None
-
-    mid_hip_vertical = CAMERA_HEIGHT_M - mid_hip_3d[1]
-    mid_hip_floor_y = mid_hip_vertical * math.tan(CAMERA_TILT_RADIANS) + mid_hip_3d[2] * math.cos(CAMERA_TILT_RADIANS)
-    mid_hip_floor_x = mid_hip_3d[0]
-    mid_hip_rot_x = mid_hip_floor_x * math.cos(CAMERA_YAW_RADIANS) - mid_hip_floor_y * math.sin(CAMERA_YAW_RADIANS)
-    mid_hip_rot_y = mid_hip_floor_x * math.sin(CAMERA_YAW_RADIANS) + mid_hip_floor_y * math.cos(CAMERA_YAW_RADIANS)
-
-    # If nose is valid and in front of mid-hip, use nose-midhip vector
-    if nose_3d is not None and nose_depth > 0 and nose_depth < mid_hip_depth:
-        dx = nose_rot_x - mid_hip_rot_x
-        dy = nose_rot_y - mid_hip_rot_y
+    if nose_valid:
+        # Vector from mid-hip to nose in image coordinates
+        dx = nose_px - mid_hip_px
+        dy = nose_py - mid_hip_py
         norm = math.hypot(dx, dy)
         if norm == 0:
-            return (0, 1)
+            return (0, -1)  # Default: facing up in image
         return (dx / norm, dy / norm)
     else:
-        # Fallback: use shoulders or hips to estimate facing direction
-        # Vector from right hip to left hip (or shoulders if hips are not valid)
+        # Fallback: use perpendicular to hip or shoulder vector
         hips_valid = not (np.isnan(left_hip_px) or np.isnan(right_hip_px))
         shoulders_valid = not (np.isnan(left_shoulder_px) or np.isnan(right_shoulder_px))
         if hips_valid:
@@ -206,20 +176,15 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
             dx = left_shoulder_px - right_shoulder_px
             dy = left_shoulder_py - right_shoulder_py
         else:
-            # Default: facing away from camera
             return (0, -1)
-        # Facing direction is perpendicular to the hip/shoulder vector, pointing away from camera (negative y)
         norm = math.hypot(dx, dy)
         if norm == 0:
             return (0, -1)
-        # Perpendicular vector (right-hand rule, assuming camera is at bottom of image)
+        # Perpendicular vector (right-hand rule)
         perp_dx = -dy / norm
         perp_dy = dx / norm
-        # Heuristic: if mid-hip is lower in image than average shoulder, assume facing away
-        if shoulders_valid and mid_hip_py > (left_shoulder_py + right_shoulder_py) / 2:
-            return (perp_dx, perp_dy)
-        else:
-            return (-perp_dx, -perp_dy)
+        # Heuristic: assume facing away from camera (up in image)
+        return (perp_dx, perp_dy)
 
 
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
