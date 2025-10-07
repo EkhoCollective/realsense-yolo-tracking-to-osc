@@ -134,12 +134,13 @@ else:
         pose_model = YOLO('yolov8l-pose.pt')
 
 
+
 def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4, conf_threshold=0.5):
     """
     Estimate facing direction using a combination of shoulder vector and facial keypoint heuristics.
     """
     # Keypoint indices
-    NOSE, L_EYE, R_EYE, L_EAR, R_EAR, L_SHOULDER, R_SHOULDER, L_HIP, R_HIP = 0, 1, 2, 3, 4, 5, 6, 11, 12
+    NOSE, L_SHOULDER, R_SHOULDER = 0, 5, 6
 
     # Get frame dimensions for boundary checks
     frame_width = depth_intrinsics.width
@@ -150,13 +151,6 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     left_shoulder_px, left_shoulder_py, left_shoulder_conf = kps[L_SHOULDER]
     right_shoulder_px, right_shoulder_py, right_shoulder_conf = kps[R_SHOULDER]
     nose_px, _, nose_conf = kps[NOSE]
-    left_ear_px, _, left_ear_conf = kps[L_EAR]
-    right_ear_px, _, right_ear_conf = kps[R_EAR]
-    left_eye_conf = kps[L_EYE][2]
-    right_eye_conf = kps[R_EYE][2]
-    left_hip_conf = kps[L_HIP][2]
-    right_hip_conf = kps[R_HIP][2]
-
 
     # --- Confidence Check for core keypoints ---
     if left_shoulder_conf < conf_threshold or right_shoulder_conf < conf_threshold:
@@ -176,45 +170,36 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     shoulder_vec_3d_z = shoulder_vec_px[1] / cos_tilt
 
     # The potential facing vector is perpendicular to the 3D shoulder vector.
-    # Rotating (x, z) by -90 degrees gives (z, -x).
-    dx = shoulder_vec_3d_z
-    dy = -shoulder_vec_3d_x
+    # Rotating (x, z) by -90 degrees gives (z, -x). This is one possibility.
+    dx1 = shoulder_vec_3d_z
+    dy1 = -shoulder_vec_3d_x
+    # The other possibility is 180 degrees opposite.
+    dx2 = -dx1
+    dy2 = -dy1
 
-    # --- Resolve 180-degree ambiguity using keypoint heuristics ---
-    # 1. Determine if person is facing towards or away from the camera.
-    # Higher confidence in facial keypoints suggests facing towards camera.
-    front_score = nose_conf + left_eye_conf + right_eye_conf + left_ear_conf + right_ear_conf
-    back_score = left_shoulder_conf + right_shoulder_conf + left_hip_conf + right_hip_conf
-    is_facing_camera = front_score > back_score
-
-    # 2. Determine left/right turn based on nose position relative to shoulder center.
-    shoulder_center_x = (left_shoulder_px + right_shoulder_px) / 2
-    turn_direction = 0 # 0: straight, >0: turned to their right, <0: turned to their left
+    # --- Resolve 180-degree ambiguity using keypoint geometry ---
+    # A person is facing the camera if their nose is detected between their shoulders.
+    is_facing_camera = False
     if nose_conf > conf_threshold:
-        turn_direction = shoulder_center_x - nose_px
+        # Get the min and max x-coordinates of the shoulders
+        shoulder_x_min = min(left_shoulder_px, right_shoulder_px)
+        shoulder_x_max = max(left_shoulder_px, right_shoulder_px)
+        if shoulder_x_min < nose_px < shoulder_x_max:
+            is_facing_camera = True
 
-    # 3. Correct the facing vector direction.
-    # The "raw" vector (dx, dy) assumes the person is looking "out of the screen".
-    # If they are facing away, we need to flip it.
-    # The sign of dy determines forward/backward in the initial projection.
+    # The vector (dx, dy) represents a direction in the world coordinate system.
+    # dy > 0 means pointing "away" from the camera (further into the scene).
+    # dy < 0 means pointing "towards" the camera.
+    
+    # We choose the vector that aligns with our front/back detection.
+    # If facing camera, we want the vector pointing towards the camera (dy < 0).
+    # If facing away, we want the vector pointing away from the camera (dy > 0).
     if is_facing_camera:
-        if dy > 0: # Vector is pointing away from camera, which is correct
-            pass
-        else: # Vector is pointing towards camera, flip it
-            dx, dy = -dx, -dy
-    else: # Facing away from camera
-        if dy < 0: # Vector is pointing towards camera, which is correct for a back view
-            pass
-        else: # Vector is pointing away from camera, flip it
-            dx, dy = -dx, -dy
-
-    # 4. Refine based on turn direction. A person turned to their right (turn_direction > 0)
-    # should have a facing vector with a component pointing to the right (positive dx).
-    if abs(turn_direction) > 5: # Add a small threshold
-        if turn_direction > 0 and dx < 0: # Turned right, but vector points left
-            dx = -dx
-        elif turn_direction < 0 and dx > 0: # Turned left, but vector points right
-            dx = -dx
+        # Pick the vector that points towards the camera (negative dy)
+        dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
+    else:
+        # Pick the vector that points away from the camera (positive dy)
+        dx, dy = (dx1, dy1) if dy1 > 0 else (dx2, dy2)
 
     # --- Apply camera yaw and smoothing ---
     cos_y, sin_y = math.cos(-CAMERA_YAW_RADIANS), math.sin(-CAMERA_YAW_RADIANS)
@@ -233,8 +218,8 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     else:
         # Ensure vectors are in the same general direction before smoothing
         dot_product = raw_vec[0] * prev_vec[0] + raw_vec[1] * prev_vec[1]
-        if dot_product < 0:
-            # This flip should be rare with the new heuristics, but kept as a safeguard
+        if dot_product < -0.5: # Allow for some change, but flip if it's a major reversal
+            # This flip should be very rare with the new heuristics, but kept as a safeguard
             raw_vec = (-raw_vec[0], -raw_vec[1])
         
         stable_dx = prev_vec[0] * (1 - smoothing_factor) + raw_vec[0] * smoothing_factor
@@ -245,7 +230,7 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
 
     return raw_vec, stable_vec
 
-    
+
 
 
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
