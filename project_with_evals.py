@@ -134,7 +134,6 @@ else:
         pose_model = YOLO('yolov8l-pose.pt')
 
 
-
 def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4, conf_threshold=0.5):
     """
     Estimate facing direction using a combination of shoulder vector and facial keypoint heuristics.
@@ -150,7 +149,7 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     kps = keypoints_with_conf
     left_shoulder_px, left_shoulder_py, left_shoulder_conf = kps[L_SHOULDER]
     right_shoulder_px, right_shoulder_py, right_shoulder_conf = kps[R_SHOULDER]
-    nose_px, _, nose_conf = kps[NOSE]
+    nose_px, nose_py, nose_conf = kps[NOSE]
 
     # --- Confidence Check for core keypoints ---
     if left_shoulder_conf < conf_threshold or right_shoulder_conf < conf_threshold:
@@ -160,6 +159,28 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     if not (0 <= left_shoulder_px < frame_width and 0 <= left_shoulder_py < frame_height and
             0 <= right_shoulder_px < frame_width and 0 <= right_shoulder_py < frame_height):
         return prev_vec or (0, 1), prev_vec or (0, 1)
+
+    # --- Resolve 180-degree ambiguity using 2D cross product ---
+    # This is the most robust way to determine front/back before projection.
+    is_facing_camera = False
+    if nose_conf > conf_threshold:
+        # Vector from left to right shoulder in image space
+        shoulder_vec_2d = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
+        
+        # Vector from shoulder center to nose in image space
+        shoulder_center_px = (left_shoulder_px + right_shoulder_px) / 2
+        shoulder_center_py = (left_shoulder_py + right_shoulder_py) / 2
+        nose_vec_2d = (nose_px - shoulder_center_px, nose_py - shoulder_center_py)
+
+        # 2D cross product: shoulder_vec_2d.x * nose_vec_2d.y - shoulder_vec_2d.y * nose_vec_2d.x
+        # If the camera is tilted down, a person facing it will have their nose "above" their shoulders in the image.
+        # This results in a negative cross product.
+        cross_product = shoulder_vec_2d[0] * nose_vec_2d[1] - shoulder_vec_2d[1] * nose_vec_2d[0]
+        
+        # A negative cross product means the nose is "above" the shoulder line relative to its orientation,
+        # which for a downward-tilted camera, means facing towards it.
+        if cross_product < 0:
+            is_facing_camera = True
 
     # --- Project 2D Shoulder Vector to 3D Floor Plane ---
     shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
@@ -177,23 +198,11 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     dx2 = -dx1
     dy2 = -dy1
 
-    # --- Resolve 180-degree ambiguity using keypoint geometry ---
-    # A person is facing the camera if their nose is detected between their shoulders.
-    is_facing_camera = False
-    if nose_conf > conf_threshold:
-        # Get the min and max x-coordinates of the shoulders
-        shoulder_x_min = min(left_shoulder_px, right_shoulder_px)
-        shoulder_x_max = max(left_shoulder_px, right_shoulder_px)
-        if shoulder_x_min < nose_px < shoulder_x_max:
-            is_facing_camera = True
-
     # The vector (dx, dy) represents a direction in the world coordinate system.
     # dy > 0 means pointing "away" from the camera (further into the scene).
     # dy < 0 means pointing "towards" the camera.
     
     # We choose the vector that aligns with our front/back detection.
-    # If facing camera, we want the vector pointing towards the camera (dy < 0).
-    # If facing away, we want the vector pointing away from the camera (dy > 0).
     if is_facing_camera:
         # Pick the vector that points towards the camera (negative dy)
         dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
@@ -229,8 +238,6 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
         stable_vec = (stable_dx / stable_norm, stable_dy / stable_norm)
 
     return raw_vec, stable_vec
-
-
 
 
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
@@ -390,6 +397,7 @@ def sample_room_edges(depth_frame, depth_intrinsics, num_points=11):
     img_w = depth_intrinsics.width
     img_h = depth_intrinsics.height
     wall_curve = []
+
 
     # Top edge
     y_top = 0
@@ -964,6 +972,7 @@ try:
                                     person_states[track_id].pop('sticky_candidate', None)
                                     person_states[track_id].pop('sticky_candidate_since', None)
                                 
+
                             # Wall segment stickiness logic
                             prev_segment = person_states[track_id]['segment']
                             if closest_segment_idx != prev_segment:
