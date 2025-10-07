@@ -133,7 +133,7 @@ else:
         pose_model = YOLO('yolov8l-pose.pt')
 
 
-def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4, conf_threshold=0.5):
+def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4, conf_threshold=0.5, smoothed_depths=None):
     """
     Estimate facing direction using a combination of shoulder vector and facial keypoint heuristics.
     """
@@ -185,40 +185,69 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
         # The raw vector in world space (before yaw) is along the negative X-axis.
         dx, dy = -1.0, 0.0
     else:
-        # --- Heuristic 2: Front/Back View using Shoulder Projection ---
+        # --- Heuristic 2: Front/Back View using a Scoring System ---
         # This part runs if it's not a clear profile view.
+        # We calculate a "front-facing score" based on keypoint visibility and geometry.
         
-        # More robust check for facing camera: are both eyes visible and is the nose between them?
-        is_facing_camera = False
-        if l_eye_conf > conf_threshold and r_eye_conf > conf_threshold and nose_conf > conf_threshold:
-            # Check if nose is horizontally between the eyes
+        front_facing_score = 0
+        
+        # Score for visible eyes and nose
+        if l_eye_conf > conf_threshold: front_facing_score += 1
+        if r_eye_conf > conf_threshold: front_facing_score += 1
+        if nose_conf > conf_threshold: front_facing_score += 1
+
+        # Bonus score if nose is geometrically centered between the eyes
+        if l_eye_conf > conf_threshold and r_eye_conf > conf_threshold:
             eye_min_x = min(l_eye_px, r_eye_px)
             eye_max_x = max(l_eye_px, r_eye_px)
-            if eye_min_x < nose_px < eye_max_x:
-                is_facing_camera = True
-        else:
-            # Fallback for when eyes are not clear, use nose confidence as a weaker signal
-            is_facing_camera = nose_conf > 0.6 # Use a slightly higher threshold for this fallback
+            # Give a bonus if nose is reasonably between the eyes
+            if eye_min_x - 5 < nose_px < eye_max_x + 5: # Added a small pixel tolerance
+                front_facing_score += 2
+        
+        # Vote 3: Relative Depth (3D Test using smoothed values)
+        if smoothed_depths:
+            nose_d = smoothed_depths.get('nose')
+            l_eye_d = smoothed_depths.get('l_eye')
+            r_eye_d = smoothed_depths.get('r_eye')
+
+            if nose_d is not None and l_eye_d is not None and r_eye_d is not None:
+                avg_eye_depth = (l_eye_d + r_eye_d) / 2.0
+                # If nose is significantly closer than the eyes, it's a strong signal for facing forward
+                if nose_d < avg_eye_depth - 0.02: # 2cm threshold
+                    front_facing_score += 2
+
+        # A score of 3 or more is a strong indicator of facing the camera
+        # (e.g., both eyes + nose visible, or one eye + nose + centered bonus)
+        is_facing_camera = front_facing_score >= 3
 
         # The potential facing vector is perpendicular to the 3D shoulder vector.
-        # Rotating (x, z) by -90 degrees gives (z, -x). This is one possibility.
-        dx1 = shoulder_vec_3d_z
-        dy1 = -shoulder_vec_3d_x
-        # The other possibility is 180 degrees opposite.
+        # We define two possibilities, 180 degrees apart.
+        dx1 = -shoulder_vec_3d_z
+        dy1 = shoulder_vec_3d_x
         dx2 = -dx1
         dy2 = -dy1
 
-        # The vector (dx, dy) represents a direction in the world coordinate system.
-        # dy > 0 means pointing "away" from the camera (further into the scene).
-        # dy < 0 means pointing "towards" the camera.
+        # --- Robustly determine which vector points towards the camera ---
+        # We use the 2D cross product to determine orientation relative to the camera's origin.
+        # This is more reliable than just checking the sign of dy.
+        # The vector from the camera (0,0) to the shoulder line is not needed, we can
+        # use the shoulder vector (shoulder_vec_3d_x, shoulder_vec_3d_z) itself.
+        # The cross product's sign tells us which perpendicular vector is "inward".
+        cross_product_with_origin = shoulder_vec_3d_x * dy1 - shoulder_vec_3d_z * dx1
         
+        # Based on the sign, we assign which vector is "towards" and which is "away"
+        if cross_product_with_origin > 0:
+            towards_cam_vec = (dx1, dy1)
+            away_from_cam_vec = (dx2, dy2)
+        else:
+            towards_cam_vec = (dx2, dy2)
+            away_from_cam_vec = (dx1, dy1)
+
         # We choose the vector that aligns with our front/back detection.
         if is_facing_camera:
-            # Pick the vector that points towards the camera (negative dy)
-            dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
+            dx, dy = towards_cam_vec
         else:
-            # Pick the vector that points away from the camera (positive dy)
-            dx, dy = (dx1, dy1) if dy1 > 0 else (dx2, dy2)
+            dx, dy = away_from_cam_vec
 
     # --- Apply camera yaw and smoothing ---
     cos_y, sin_y = math.cos(CAMERA_YAW_RADIANS), math.sin(CAMERA_YAW_RADIANS)
@@ -902,34 +931,51 @@ try:
                         current_time_for_state = time.time()
 
                         # Helper function to get segment index to avoid code repetition
-                        def get_current_segment_idx(track_id, person_pos):
-                            if args.orientation_tracking and pose_results is not None:
-                                pose_keypoints_data = pose_results[0].keypoints.data.cpu().numpy()
-                                best_pose_idx = None
-                                min_nose_dist = float('inf')
-                                for i, kps in enumerate(pose_keypoints_data):
-                                    nose_x, nose_y, _ = kps[0]
-                                    dist = math.hypot(cx - nose_x, cy - nose_y)
-                                    if dist < min_nose_dist:
-                                        min_nose_dist = dist
-                                        best_pose_idx = i
-                                if best_pose_idx is not None:
-                                    keypoints_with_conf = pose_keypoints_data[best_pose_idx]
-                                    try:
-                                        prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
-                                        raw_vec, stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
-                                        if track_id in person_states:
-                                            person_states[track_id]['facing_vec'] = stable_vec
-                                        segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
-                                        # If cone finds nothing, fall back to closest
-                                        if segment_idx is None:
-                                            segment_idx = closest_wall_segment(person_pos[0], person_pos[1])
-                                        return segment_idx
-                                    except Exception as e:
-                                        print(f"[WARN] Error computing facing direction for ID {track_id}: {e}")
-                                        return closest_wall_segment(person_pos[0], person_pos[1])
-                                else:
-                                    print(f"[WARN] No pose keypoints matched for ID {track_id}, using closest segment.")
+                        def get_current_segment_idx(track_id, person_pos, keypoints_with_conf=None):
+                            # --- Depth Smoothing for Orientation ---
+                            smoothed_depths = None
+                            if args.orientation_tracking and keypoints_with_conf is not None:
+                                state = person_states.get(track_id, {})
+                                # Initialize history if it doesn't exist
+                                if 'depth_history' not in state:
+                                    state['depth_history'] = {'nose': [], 'l_eye': [], 'r_eye': []}
+                                
+                                # Get current depths
+                                nose_px, nose_py, _ = keypoints_with_conf[0]
+                                l_eye_px, l_eye_py, _ = keypoints_with_conf[1]
+                                r_eye_px, r_eye_py, _ = keypoints_with_conf[2]
+
+                                # Append current valid depths to history
+                                for name, px, py in [('nose', nose_px, nose_py), ('l_eye', l_eye_px, l_eye_py), ('r_eye', r_eye_px, r_eye_py)]:
+                                    depth = depth_frame.get_distance(int(px), int(py))
+                                    if depth > 0:
+                                        state['depth_history'][name].append(depth)
+                                        # Keep history to a fixed size (e.g., last 5 frames)
+                                        if len(state['depth_history'][name]) > 5:
+                                            state['depth_history'][name].pop(0)
+                                
+                                # Calculate smoothed average if history is available
+                                smoothed_depths = {}
+                                for name, history in state['depth_history'].items():
+                                    if history:
+                                        smoothed_depths[name] = sum(history) / len(history)
+                                if track_id in person_states:
+                                     person_states[track_id]['depth_history'] = state['depth_history']
+
+
+                            if args.orientation_tracking and pose_results is not None and keypoints_with_conf is not None:
+                                try:
+                                    prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
+                                    raw_vec, stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec, smoothed_depths=smoothed_depths)
+                                    if track_id in person_states:
+                                        person_states[track_id]['facing_vec'] = stable_vec
+                                    segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
+                                    # If cone finds nothing, fall back to closest
+                                    if segment_idx is None:
+                                        segment_idx = closest_wall_segment(person_pos[0], person_pos[1])
+                                    return segment_idx
+                                except Exception as e:
+                                    print(f"[WARN] Error computing facing direction for ID {track_id}: {e}")
                                     return closest_wall_segment(person_pos[0], person_pos[1])
                             else:
                                 return closest_wall_segment(person_pos[0], person_pos[1])
@@ -948,7 +994,8 @@ try:
                                 'osc_sent': False,
                                 'segment': closest_segment_idx,
                                 'facing_vec': None,
-                                'last_seen': current_time_for_state
+                                'last_seen': current_time_for_state,
+                                'depth_history': {'nose': [], 'l_eye': [], 'r_eye': []}
                             }
                         else:
                             # Existing person, check if they moved beyond tolerance
@@ -966,7 +1013,7 @@ try:
                                 person_states[track_id]['sticky_cell'] = current_cell
                             else:
                                 # Person has not moved, do not update segment.
-                                # Update facing vector if available
+                                # Update facing vector and smoothed depths if available
                                 if args.orientation_tracking:
                                      get_current_segment_idx(track_id, (rotated_x, rotated_y))
 
