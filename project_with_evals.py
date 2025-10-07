@@ -8,6 +8,7 @@ import time # Import the time module
 import argparse # Add argparse for command-line arguments¨
 import os
 import pandas as pd
+import torch
 
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser(description="YOLOv8 RealSense Tracker")
@@ -22,10 +23,10 @@ parser.add_argument("--tilt", type=float, default=50, help="Camera tilt angle in
 parser.add_argument("--tolerance", type=int, default=1, help="Grid cell movement tolerance for stillness")
 parser.add_argument("--rgb-exposure", type=int, default=1000, help="RGB camera exposure value (-1 for auto)")
 parser.add_argument("--yaw", type=float, default=-0, help="Camera yaw angle in degrees (positive = right)")
-parser.add_argument("--rs-width", type=int, default=1280, help="RealSense stream width in pixels")
-parser.add_argument("--rs-height", type=int, default=720, help="RealSense stream height in pixels")
+parser.add_argument("--rs-width", type=int, default=640, help="RealSense stream width in pixels")
+parser.add_argument("--rs-height", type=int, default=484, help="RealSense stream height in pixels")
 parser.add_argument("--wall-idx-offset", type=int, default=0, help="Threshold for using opposite wall segment for projection")
-parser.add_argument("--extra-wall", type=float, default=0.0, help="Extra wall length (in meters) to add to the longer end of the segmented wall")
+parser.add_argument("--extra-wall", type=float, default=0, help="Extra wall length (in meters) to add to the longer end of the segmented wall")
 parser.add_argument("--num-segments", type=int, default=11, help="Number of wall segments for tracking")
 parser.add_argument("--projection_width", type=int, default=4800, help="Resolution width for wall projection")
 parser.add_argument("--projection_height", type=int, default=1200, help="Resolution height for wall projection")
@@ -34,7 +35,7 @@ parser.add_argument("--calibrate-wall", action="store_true", help="Enable intera
 parser.add_argument("--replay-path", type=str, default=None, help="Folder with recorded RGB/depth frames for replay")
 parser.add_argument("--osc-log", type=str, default=None, help="Path to log OSC output for evaluation")
 parser.add_argument("--orientation-tracking", action="store_true", help="Enable orientation tracking using pose estimation")
-parser.add_argument("--cone-angle", type=float, default=130, help="Cone angle in degrees for orientation-based wall segment assignment")
+parser.add_argument("--cone-angle", type=float, default=75, help="Cone angle in degrees for orientation-based wall segment assignment")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -119,10 +120,18 @@ print("[INFO] Camera ready.")
 
 # --- 2. Model Initialization ---
 # Load the ultra-efficient YOLOv8-L model
-model = YOLO('yolov8l.pt')
-pose_model = None
-if args.orientation_tracking:
-    pose_model = YOLO('yolov8l-pose.pt')
+if torch.cuda.is_available():
+    print("[INFO] Loading models onto GPU...")
+    model = YOLO('yolov8l.pt').cuda()
+    pose_model = None
+    if args.orientation_tracking:
+        pose_model = YOLO('yolov8l-pose.pt').cuda()
+else:
+    print("[INFO] Loading models onto CPU...")
+    model = YOLO('yolov8l.pt')
+    pose_model = None
+    if args.orientation_tracking:
+        pose_model = YOLO('yolov8l-pose.pt')
 
 def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     """
@@ -139,6 +148,7 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     # Get depth for each keypoint
     nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
     mid_hip_depth = depth_frame.get_distance(int(mid_hip_px), int(mid_hip_py))
+  
 
     # Convert to world coordinates
     nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
@@ -950,7 +960,11 @@ try:
                                 best_pose_idx = i
                         if best_pose_idx is not None:
                             keypoints = pose_keypoints[best_pose_idx]
-                            facing_vec = get_facing_direction(keypoints, depth_frame, depth_intrinsics)
+                            try:
+                                facing_vec = get_facing_direction(keypoints, depth_frame, depth_intrinsics)
+                            except Exception as e:
+                                print(f"[ERROR] Facing vector calculation failed: {e}")
+                                continue
                             # Use world coordinates for cone visualization
                             # Get world position of nose
                             nose_px, nose_py = keypoints[0][:2]
