@@ -883,112 +883,136 @@ try:
                     x1, y1, x2, y2 = box
                     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                     distance_m = depth_frame.get_distance(cx, cy)
+                    if 0 < distance_m < 10:
+                        point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], distance_m)
+                        vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
+                        floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+                        floor_x = point_3d[0] + CAMERA_X_OFFSET_M
+                        rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
+                        rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
+                        grid_x = math.floor(rotated_x)
+                        grid_y = math.floor(rotated_y)
+                        current_frame_grid_cells.add((grid_x, grid_y))
+                        if args.orientation_tracking and pose_results is not None:
+                            pose_keypoints_data = pose_results[0].keypoints.data.cpu().numpy() # Use .data to get x,y,conf
+                            best_pose_idx = None
+                            min_nose_dist = float('inf')
+                            for i, kps in enumerate(pose_keypoints_data):
+                                nose_x, nose_y, _ = kps[0]
+                                dist = math.hypot(cx - nose_x, cy - nose_y)
+                                if dist < min_nose_dist:
+                                    min_nose_dist = dist
+                                    best_pose_idx = i
+                            if best_pose_idx is not None:
+                                keypoints_with_conf = pose_keypoints_data[best_pose_idx]
+                                try:
+                                    # Get previous stable vector from state
+                                    prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
+                                    raw_vec, stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
+                                    
+                                    # Store the new stable vector in the person's state
+                                    if track_id in person_states:
+                                        person_states[track_id]['facing_vec'] = stable_vec
 
-                    if not (0 < distance_m < 10):
-                        continue
+                                    person_pos = (rotated_x, rotated_y)
+                                    closest_segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
+                                except Exception as e:
+                                    print(f"[WARN] Error computing facing direction for ID {track_id}: {e}")
+                                    closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
+                            else:
+                                # Fallback to closest segment if pose not found
+                                closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
+                                print(f"[WARN] No pose keypoints matched for ID {track_id}, using closest segment.")
+                        else:
+                            closest_segment_idx = closest_wall_segment(rotated_x, rotated_y)
+                        # --- Update Person State for Stillness Detection ---
+                        current_cell = (grid_x, grid_y)
+                        current_time_for_state = time.time()
 
-                    # --- 1. Calculate current position ---
-                    point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], distance_m)
-                    vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
-                    floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
-                    floor_x = point_3d[0] + CAMERA_X_OFFSET_M
-                    rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
-                    rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
-                    grid_x = math.floor(rotated_x)
-                    grid_y = math.floor(rotated_y)
-                    current_cell = (grid_x, grid_y)
-                    current_time_for_state = time.time()
-                    current_frame_grid_cells.add(current_cell)
+                        if track_id not in person_states:
+                            # New person detected
+                            person_states[track_id] = {
+                                'origin_cell': current_cell,
+                                'current_cell': current_cell,
+                                'sticky_cell': current_cell,
+                                'sticky_since': current_time_for_state,
+                                'still_since': current_time_for_state,
+                                'osc_sent': False,
+                                # Wall segment stickiness
+                                'segment': closest_segment_idx,
+                                'segment_candidate': closest_segment_idx,
+                                'segment_candidate_since': current_time_for_state,
+                                # Orientation tracking
+                                'facing_vec': None 
+                            }
+                        else:
+                            # Existing person, check if they moved beyond tolerance
+                            origin_cell = person_states[track_id]['origin_cell']
+                            dx = abs(current_cell[0] - origin_cell[0])
+                            dy = abs(current_cell[1] - origin_cell[1])
+                            if dx > MOVEMENT_TOLERANCE or dy > MOVEMENT_TOLERANCE:
+                                # Person moved outside tolerance, reset origin and timer
+                                person_states[track_id]['origin_cell'] = current_cell
+                                person_states[track_id]['still_since'] = current_time_for_state
+                                person_states[track_id]['osc_sent'] = False
+                                # Also update sticky cell immediately
+                                person_states[track_id]['sticky_cell'] = current_cell
+                                
+                            else:
+                                # If within tolerance, check if they've stayed in a new cell long enough
+                                if current_cell != person_states[track_id]['sticky_cell']:
+                                    # Entered a new adjacent cell
+                                    if person_states[track_id].get('sticky_candidate') == current_cell:
+                                        # Already tracking this candidate cell
+                                        if current_time_for_state - person_states[track_id].get('sticky_candidate_since', current_time_for_state) > STICKY_CELL_DURATION:
+                                            # Stayed long enough, update sticky cell
+                                            person_states[track_id]['sticky_cell'] = current_cell
+                                            person_states[track_id]['sticky_since'] = current_time_for_state
+                                            person_states[track_id].pop('sticky_candidate', None)
+                                            person_states[track_id].pop('sticky_candidate_since', None)
+                                    else:
+                                        # Start tracking candidate cell
+                                        person_states[track_id]['sticky_candidate'] = current_cell
+                                        person_states[track_id]['sticky_candidate_since'] = current_time_for_state
+                                else:
+                                    # Reset candidate if back to sticky cell
+                                    person_states[track_id].pop('sticky_candidate', None)
+                                    person_states[track_id].pop('sticky_candidate_since', None)
+                                
+                            # Wall segment stickiness logic
+                            prev_segment = person_states[track_id]['segment']
+                            if closest_segment_idx != prev_segment:
+                                # Candidate for segment change
+                                if person_states[track_id]['segment_candidate'] == closest_segment_idx:
+                                    # Already tracking this candidate
+                                    if current_time_for_state - person_states[track_id]['segment_candidate_since'] > STICKY_CELL_DURATION:
+                                        # Stayed long enough, update segment
+                                        person_states[track_id]['segment'] = closest_segment_idx
+                                        person_states[track_id]['segment_candidate_since'] = current_time_for_state
+                                else:
+                                    # New candidate segment
+                                    person_states[track_id]['segment_candidate'] = closest_segment_idx
+                                    person_states[track_id]['segment_candidate_since'] = current_time_for_state
+                            else:
+                                # Reset candidate if back to previous segment
+                                person_states[track_id]['segment_candidate'] = closest_segment_idx
+                                person_states[track_id]['segment_candidate_since'] = current_time_for_state
 
-                    # --- 2. Initialize state for new people ---
-                    if track_id not in person_states:
-                        person_states[track_id] = {
-                            'origin_cell': current_cell, 'current_cell': current_cell,
-                            'sticky_cell': current_cell, 'sticky_since': current_time_for_state,
-                            'still_since': current_time_for_state, 'osc_sent': False,
-                            'segment': None, 'segment_candidate': None,
-                            'segment_candidate_since': current_time_for_state,
-                            'facing_vec': None
-                        }
-
-                    # --- 3. Determine if the person has moved ---
-                    origin_cell = person_states[track_id]['origin_cell']
-                    dx = abs(current_cell[0] - origin_cell[0])
-                    dy = abs(current_cell[1] - origin_cell[1])
-                    has_moved = (dx > MOVEMENT_TOLERANCE or dy > MOVEMENT_TOLERANCE)
-
-                    # --- 4. Update orientation (facing vector) regardless of movement ---
-                    if args.orientation_tracking and pose_results is not None:
-                        pose_keypoints_data = pose_results[0].keypoints.data.cpu().numpy()
-                        best_pose_idx = None
-                        min_nose_dist = float('inf')
-                        for i, kps in enumerate(pose_keypoints_data):
-                            nose_x, nose_y, _ = kps[0]
-                            dist = math.hypot(cx - nose_x, cy - nose_y)
-                            if dist < min_nose_dist:
-                                min_nose_dist = dist
-                                best_pose_idx = i
+                        person_states[track_id]['current_cell'] = current_cell
                         
-                        if best_pose_idx is not None:
-                            keypoints_with_conf = pose_keypoints_data[best_pose_idx]
-                            prev_stable_vec = person_states[track_id].get('facing_vec')
-                            try:
-                                _, stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
-                                person_states[track_id]['facing_vec'] = stable_vec
-                            except Exception as e:
-                                print(f"[WARN] Error computing facing direction for ID {track_id}: {e}")
-
-                    # --- 5. Update wall segment only if the person is new or has moved ---
-                    if has_moved or person_states[track_id]['segment'] is None:
-                        new_segment_idx = None
-                        if args.orientation_tracking and person_states[track_id]['facing_vec'] is not None:
-                            person_pos = (rotated_x, rotated_y)
-                            facing_vec = person_states[track_id]['facing_vec']
-                            new_segment_idx = is_wall_in_cone(person_pos, facing_vec, WALL_SEGMENTS)
                         
-                        # Fallback to closest segment if orientation tracking is off or fails
-                        if new_segment_idx is None:
-                            new_segment_idx = closest_wall_segment(rotated_x, rotated_y)
-                        
-                        # Update segment candidate
-                        person_states[track_id]['segment_candidate'] = new_segment_idx
-                        person_states[track_id]['segment_candidate_since'] = current_time_for_state
-                    
-                    # --- 6. Update person state (stillness, sticky cells, sticky segments) ---
-                    person_states[track_id]['current_cell'] = current_cell
-                    if has_moved:
-                        # Person moved outside tolerance, reset stillness timer and origin
-                        person_states[track_id]['origin_cell'] = current_cell
-                        person_states[track_id]['still_since'] = current_time_for_state
-                        person_states[track_id]['osc_sent'] = False
-                        # Also update sticky cell immediately
-                        person_states[track_id]['sticky_cell'] = current_cell
-                    
-                    # Wall segment stickiness logic (check if candidate should become permanent)
-                    prev_segment = person_states[track_id]['segment']
-                    candidate_segment = person_states[track_id]['segment_candidate']
-                    if candidate_segment != prev_segment:
-                        candidate_since = person_states[track_id]['segment_candidate_since']
-                        if current_time_for_state - candidate_since > STICKY_CELL_DURATION:
-                            person_states[track_id]['segment'] = candidate_segment
-
-                    # --- 7. Visualization & Stillness Logic ---
-                    is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
-                    if is_still:
-                        final_segment = person_states[track_id]['segment']
-                        if final_segment is not None:
-                            still_segments.add(final_segment)
-                        still_cells.add(current_cell)
-
-                    if show_window:
-                        viz_color = (0, 255, 0) if is_still else (0, 255, 255)
-                        seg_to_show = person_states[track_id]['segment']
-                        label = f"ID {track_id}"
-                        if seg_to_show is not None:
-                            label += f": seg {seg_to_show + 1}"
-                        cv2.putText(annotated_frame, label, (x1, y1 - 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
-                        cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
+                        # --- Visualization & Stillness Logic ---
+                        is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
+                        if is_still:
+                            still_segments.add(person_states[track_id]['segment'])
+                            still_cells.add(current_cell)
+                        # Draw info on the frame only if window is visible
+                        if show_window and closest_segment_idx is not None:
+                            viz_color = (0, 255, 0) if is_still else (0, 255, 255)
+                            label = f"ID {track_id}: seg {closest_segment_idx+1} @ {distance_m:.2f}m"
+                            cv2.putText(annotated_frame, label, (x1, y1 - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
+                            cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
 
         # --- Timed OSC Sending & Visualization ---
         current_time = time.time()
