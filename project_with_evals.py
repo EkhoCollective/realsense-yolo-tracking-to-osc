@@ -36,6 +36,7 @@ parser.add_argument("--replay-path", type=str, default=None, help="Folder with r
 parser.add_argument("--osc-log", type=str, default=None, help="Path to log OSC output for evaluation")
 parser.add_argument("--orientation-tracking", action="store_true", help="Enable orientation tracking using pose estimation")
 parser.add_argument("--cone-angle", type=float, default=75, help="Cone angle in degrees for orientation-based wall segment assignment")
+parser.add_argument("--occlusion-forgiveness", type=float, default=3.0, help="Seconds to retain an occluded person's state before removal.")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -115,8 +116,6 @@ align_to = rs.stream.color
 align = rs.align(align_to)
 
 print("[INFO] Camera ready.")
-
-
 
 # --- 2. Model Initialization ---
 # Load the ultra-efficient YOLOv8-L model
@@ -936,7 +935,8 @@ try:
                                 'segment_candidate': closest_segment_idx,
                                 'segment_candidate_since': current_time_for_state,
                                 # Orientation tracking
-                                'facing_vec': None 
+                                'facing_vec': None,
+                                'last_seen': current_time_for_state
                             }
                         else:
                             # Existing person, check if they moved beyond tolerance
@@ -993,6 +993,7 @@ try:
                                 person_states[track_id]['segment_candidate_since'] = current_time_for_state
 
                         person_states[track_id]['current_cell'] = current_cell
+                        person_states[track_id]['last_seen'] = current_time_for_state
                         
                         
                         # --- Visualization & Stillness Logic ---
@@ -1011,12 +1012,38 @@ try:
         # --- Timed OSC Sending & Visualization ---
         current_time = time.time()
         if current_time - last_osc_send_time > OSC_SEND_INTERVAL:
+            # --- Handle Occlusion and State Cleanup ---
+            # Check for people who are still and those who are occluded but within forgiveness period
+            active_person_states = {}
+            for tid, state in person_states.items():
+                is_occluded = tid not in current_frame_ids
+                time_since_seen = current_time - state['last_seen']
+
+                if not is_occluded:
+                    # Person is visible, keep them
+                    active_person_states[tid] = state
+                elif is_occluded and time_since_seen < args.occlusion_forgiveness:
+                    # Person is occluded, but within the forgiveness period. Keep them.
+                    # We can also reset their stillness timer if we don't want occluded people to become "still"
+                    # state['still_since'] = current_time 
+                    active_person_states[tid] = state
+                # else: person is occluded and forgiveness period has passed, so they are dropped.
+
+            person_states = active_person_states
+            
+            # --- Determine still segments from the remaining active states ---
+            still_segments.clear() # Clear before recalculating
+            for tid, state in person_states.items():
+                is_still = (current_time - state['still_since']) > STILLNESS_DURATION
+                if is_still:
+                    still_segments.add(state['segment'])
+
+
             osc_list = [1 if idx in still_segments else 0 for idx in range(WALL_IDX_OFFSET, NUM_SEGMENTS)]
             print(f"[INFO] Sending OSC message: {osc_list}")
             osc_client.send_message(OSC_ADDRESS, osc_list)
             if osc_log_file:
                 osc_log_file.write(f"{frame_counter}," + ",".join(str(x) for x in osc_list) + "\n")
-            person_states = {tid: state for tid, state in person_states.items() if tid in current_frame_ids}
             last_osc_send_time = current_time
 
         if args.orientation_tracking and pose_results is not None and show_window:
