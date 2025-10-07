@@ -133,51 +133,109 @@ else:
         pose_model = YOLO('yolov8l-pose.pt')
 
 
+import math
+# Assuming rs (e.g., pyrealsense2) is imported and global constants are defined:
+# CAMERA_X_OFFSET_M, CAMERA_HEIGHT_M, CAMERA_TILT_RADIANS, CAMERA_YAW_RADIANS
+
 def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     """
-    Estimate facing direction (unit vector) from pose keypoints in world coordinates.
-    Uses nose and mid-hip for direction, applies camera tilt and yaw.
+    Estimate facing direction (unit vector) by finding the normal vector of the
+    torso plane in 3D world coordinates and correcting the 180-degree ambiguity
+    using 2D pixel geometry from a ceiling-mounted camera.
     """
-    # Get pixel coordinates
-    nose_px, nose_py = keypoints[0][:2]
-    left_hip_px, left_hip_py = keypoints[11][:2]
-    right_hip_px, right_hip_py = keypoints[12][:2]
-    mid_hip_px = (left_hip_px + right_hip_px) / 2
-    mid_hip_py = (left_hip_py + right_hip_py) / 2
+    # Keypoint Indices: 5: L Shoulder, 6: R Shoulder, 11: L Hip, 12: R Hip
+    KEYPOINTS_USED = [5, 6, 11, 12]
+    PIXEL_THRESHOLD = 1.0  # Threshold (in pixels) for near-frontal view ambiguity
 
-    # Get depth for each keypoint
-    nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
-    mid_hip_depth = depth_frame.get_distance(int(mid_hip_px), int(mid_hip_py))
+    keypoint_pixels = [keypoints[i][:2] for i in KEYPOINTS_USED]
+    keypoint_3d_raw = []
 
-    # Convert to world coordinates
-    nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
-    mid_hip_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [mid_hip_px, mid_hip_py], mid_hip_depth)
+    # --- Helper function for 3D Projection ---
+    def project_to_floor_plane(point_3d):
+        """Transforms a 3D point from raw camera space to room-floor space (X, Y, Z_relative)."""
+        # Apply camera offset
+        point_3d[0] += CAMERA_X_OFFSET_M
+        
+        # Projection onto floor plane using tilt
+        vertical = CAMERA_HEIGHT_M - point_3d[1]
+        floor_y = vertical * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+        floor_x = point_3d[0]
+        
+        # Apply yaw rotation
+        rot_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
+        rot_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
+        
+        # Use a Z component (height from floor) for the plane calculation
+        floor_z = point_3d[2] # Use camera Z as a relative height component
 
-    # Apply camera offset
-    nose_3d[0] += CAMERA_X_OFFSET_M
-    mid_hip_3d[0] += CAMERA_X_OFFSET_M
+        return [rot_x, rot_y, floor_z]
 
-    # Project onto floor plane using tilt
-    nose_vertical = CAMERA_HEIGHT_M - nose_3d[1]
-    mid_hip_vertical = CAMERA_HEIGHT_M - mid_hip_3d[1]
-    nose_floor_y = nose_vertical * math.tan(CAMERA_TILT_RADIANS) + nose_3d[2] * math.cos(CAMERA_TILT_RADIANS)
-    mid_hip_floor_y = mid_hip_vertical * math.tan(CAMERA_TILT_RADIANS) + mid_hip_3d[2] * math.cos(CAMERA_TILT_RADIANS)
-    nose_floor_x = nose_3d[0]
-    mid_hip_floor_x = mid_hip_3d[0]
+    # 1. Convert 2D Keypoints to 3D World Coordinates
+    for px, py in keypoint_pixels:
+        px_int, py_int = int(px), int(py)
+        
+        # Get depth (consider using an average depth around the pixel for stability)
+        depth_val = depth_frame.get_distance(px_int, py_int)
 
-    # Apply yaw rotation
-    nose_rot_x = nose_floor_x * math.cos(CAMERA_YAW_RADIANS) - nose_floor_y * math.sin(CAMERA_YAW_RADIANS)
-    nose_rot_y = nose_floor_x * math.sin(CAMERA_YAW_RADIANS) + nose_floor_y * math.cos(CAMERA_YAW_RADIANS)
-    mid_hip_rot_x = mid_hip_floor_x * math.cos(CAMERA_YAW_RADIANS) - mid_hip_floor_y * math.sin(CAMERA_YAW_RADIANS)
-    mid_hip_rot_y = mid_hip_floor_x * math.sin(CAMERA_YAW_RADIANS) + mid_hip_floor_y * math.cos(CAMERA_YAW_RADIANS)
+        if depth_val == 0.0:
+            # Cannot calculate reliable 3D pose if core points are missing depth
+            print("Warning: Missing depth for core keypoint.")
+            return (0.0, 0.0) 
 
-    # Facing vector in world coordinates (from mid-hip to nose)
-    dx = nose_rot_x - mid_hip_rot_x
-    dy = nose_rot_y - mid_hip_rot_y
-    norm = math.hypot(dx, dy)
+        point_3d_raw = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [px, py], depth_val)
+        keypoint_3d_raw.append(project_to_floor_plane(point_3d_raw))
+        
+    LS_3D, RS_3D, LH_3D, RH_3D = keypoint_3d_raw
+
+    # 2. Calculate Torso Plane Vectors
+    # V1: Across the shoulders (Right - Left)
+    V1 = [RS_3D[i] - LS_3D[i] for i in range(3)] 
+    
+    # V2: Down the torso (Mid-Shoulder to Mid-Hip)
+    MS = [(LS_3D[i] + RS_3D[i]) / 2 for i in range(3)]
+    MH = [(LH_3D[i] + RH_3D[i]) / 2 for i in range(3)]
+    V2 = [MH[i] - MS[i] for i in range(3)] 
+
+    # 3. Calculate the Plane Normal Vector (Cross Product N = V1 x V2)
+    N = [
+        V1[1] * V2[2] - V1[2] * V2[1], # X component
+        V1[2] * V2[0] - V1[0] * V2[2], # Y component
+        V1[0] * V2[1] - V1[1] * V2[0]  # Z component
+    ]
+
+    # --- 4. 2D Vertical Heuristic Correction (Tie-Breaker) ---
+
+    # Get 2D pixel coordinates for shoulders and hips
+    y_5, y_6 = keypoints[5][1], keypoints[6][1]
+    y_11, y_12 = keypoints[11][1], keypoints[12][1]
+
+    # Calculate average Y for left and right side (in pixel space)
+    Y_L_avg = (y_5 + y_11) / 2
+    Y_R_avg = (y_6 + y_12) / 2
+
+    final_dx, final_dy = N[0], N[1] # Projection onto floor (XY plane)
+
+    # Logic: Smaller Y (higher on screen) means further away from the camera.
+    # Person faces AWAY from the side that is further away.
+    if (Y_L_avg < Y_R_avg - PIXEL_THRESHOLD):
+        # Left side is further away -> Person is facing Camera Right (Positive X)
+        if final_dx < 0:
+            final_dx, final_dy = -final_dx, -final_dy
+            
+    elif (Y_R_avg < Y_L_avg - PIXEL_THRESHOLD):
+        # Right side is further away -> Person is facing Camera Left (Negative X)
+        if final_dx > 0:
+            final_dx, final_dy = -final_dx, -final_dy
+    
+    # If the difference is within the threshold, we keep the raw 3D Normal (N)
+    # as the person is near-frontal/rear, and the ambiguity is minimal.
+
+    # 5. Normalize the final corrected vector
+    norm = math.hypot(final_dx, final_dy)
     if norm == 0:
-        return (0, 1)
-    return (dx / norm, dy / norm)
+        return (0.0, 0.0)
+    
+    return (final_dx / norm, final_dy / norm)
 
 
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
