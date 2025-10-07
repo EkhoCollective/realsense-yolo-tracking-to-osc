@@ -118,11 +118,11 @@ print("[INFO] Camera ready.")
 
 
 # --- 2. Model Initialization ---
-# Load the ultra-efficient YOLOv8-Nano model
-model = YOLO('yolov8.pt')
+# Load the ultra-efficient YOLOv8-L model
+model = YOLO('yolov8l.pt')
 pose_model = None
 if args.orientation_tracking:
-    pose_model = YOLO('yolov8-pose.pt')
+    pose_model = YOLO('yolov8l-pose.pt')
 
 def get_facing_direction(keypoints, depth_frame, depth_intrinsics):
     """
