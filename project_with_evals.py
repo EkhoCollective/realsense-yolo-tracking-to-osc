@@ -133,119 +133,111 @@ else:
         pose_model = YOLO('yolov8l-pose.pt')
 
 
-
-
-
-MIN_KEYPOINT_CONFIDENCE = 0.3 
-
-def get_facing_direction(keypoints, depth_frame, depth_intrinsics, last_direction=(0.0, 1.0)):
+def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4, conf_threshold=0.5):
     """
-    Estimates facing direction with robust checks for NoneType, keypoint completeness, 
-    and minimum confidence/visibility.
+    Estimate facing direction using a combination of shoulder vector and facial keypoint heuristics.
     """
+    # Keypoint indices
+    NOSE, L_SHOULDER, R_SHOULDER = 0, 5, 6
+
+    # Get frame dimensions for boundary checks
+    frame_width = depth_intrinsics.width
+    frame_height = depth_intrinsics.height
+
+    # Get pixel coordinates and confidence for keypoints
+    kps = keypoints_with_conf
+    left_shoulder_px, left_shoulder_py, left_shoulder_conf = kps[L_SHOULDER]
+    right_shoulder_px, right_shoulder_py, right_shoulder_conf = kps[R_SHOULDER]
+    nose_px, nose_py, nose_conf = kps[NOSE]
+
+    # --- Confidence Check for core keypoints ---
+    if left_shoulder_conf < conf_threshold or right_shoulder_conf < conf_threshold:
+        return prev_vec or (0, 1), prev_vec or (0, 1)
+
+    # --- Boundary Check ---
+    if not (0 <= left_shoulder_px < frame_width and 0 <= left_shoulder_py < frame_height and
+            0 <= right_shoulder_px < frame_width and 0 <= right_shoulder_py < frame_height):
+        return prev_vec or (0, 1), prev_vec or (0, 1)
+
+    # --- Resolve 180-degree ambiguity using 2D cross product ---
+    # This is the most robust way to determine front/back before projection.
+    is_facing_camera = False
+    if nose_conf > conf_threshold:
+        # Vector from left to right shoulder in image space
+        shoulder_vec_2d = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
+        
+        # Vector from shoulder center to nose in image space
+        shoulder_center_px = (left_shoulder_px + right_shoulder_px) / 2
+        shoulder_center_py = (left_shoulder_py + right_shoulder_py) / 2
+        nose_vec_2d = (nose_px - shoulder_center_px, nose_py - shoulder_center_py)
+
+        # 2D cross product: shoulder_vec_2d.x * nose_vec_2d.y - shoulder_vec_2d.y * nose_vec_2d.x
+        # If the camera is tilted down, a person facing it will have their nose "above" their shoulders in the image.
+        # This results in a negative cross product.
+        cross_product = shoulder_vec_2d[0] * nose_vec_2d[1] - shoulder_vec_2d[1] * nose_vec_2d[0]
+        
+        # A negative cross product means the nose is "above" the shoulder line relative to its orientation,
+        # which for a downward-tilted camera, means facing towards it.
+        if cross_product < 0:
+            is_facing_camera = True
+
+    # --- Project 2D Shoulder Vector to 3D Floor Plane ---
+    shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
+    cos_tilt = math.cos(CAMERA_TILT_RADIANS)
+    if cos_tilt == 0: return prev_vec or (0, 1), prev_vec or (0, 1)
+
+    shoulder_vec_3d_x = shoulder_vec_px[0]
+    shoulder_vec_3d_z = shoulder_vec_px[1] / cos_tilt
+
+    # The potential facing vector is perpendicular to the 3D shoulder vector.
+    # Rotating (x, z) by -90 degrees gives (z, -x). This is one possibility.
+    dx1 = shoulder_vec_3d_z
+    dy1 = -shoulder_vec_3d_x
+    # The other possibility is 180 degrees opposite.
+    dx2 = -dx1
+    dy2 = -dy1
+
+    # The vector (dx, dy) represents a direction in the world coordinate system.
+    # dy > 0 means pointing "away" from the camera (further into the scene).
+    # dy < 0 means pointing "towards" the camera.
     
-    KEYPOINTS_USED = [5, 6, 11, 12]  # L Shoulder, R Shoulder, L Hip, R Hip
-    PIXEL_THRESHOLD = 8.0            
-    SMOOTHING_FACTOR = 0.2           
+    # We choose the vector that aligns with our front/back detection.
+    if is_facing_camera:
+        # Pick the vector that points towards the camera (negative dy)
+        dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
+    else:
+        # Pick the vector that points away from the camera (positive dy)
+        dx, dy = (dx1, dy1) if dy1 > 0 else (dx2, dy2)
 
-    # 1. CRITICAL INITIAL CHECK (Handles NoneType, empty list, and too-short list)
-    # The error 'NoneType' object is not subscriptable means keypoints is None.
-    # The len(keypoints) check handles cases where the tracking returns [] or a truncated list.
-    if keypoints is None or not isinstance(keypoints, (list, tuple)) or len(keypoints) < max(KEYPOINTS_USED) + 1:
-        return last_direction
-        
-    # 2. Keypoint Confidence and Validity Check
-    for i in KEYPOINTS_USED:
-        # Check if the keypoint entry itself might be None, or too short (i.e., less than [x, y, conf])
-        # This prevents the error if the list keypoints[i] is None or short.
-        if keypoints[i] is None or len(keypoints[i]) < 3 or keypoints[i][2] < MIN_KEYPOINT_CONFIDENCE:
-            return last_direction
+    # --- Apply camera yaw and smoothing ---
+    cos_y, sin_y = math.cos(-CAMERA_YAW_RADIANS), math.sin(-CAMERA_YAW_RADIANS)
+    raw_dx = dx * cos_y - dy * sin_y
+    raw_dy = dx * sin_y + dy * cos_y
 
-    keypoint_pixels = [keypoints[i][:2] for i in KEYPOINTS_USED]
-    keypoint_3d_raw = []
-
-    # --- Helper function for 3D Projection (Assumes access to global constants) ---
-    def project_to_floor_plane(point_3d):
-        """Transforms a 3D point from raw camera space to room-floor space (X, Y, Z_relative)."""
-        point_3d[0] += CAMERA_X_OFFSET_M
-        vertical = CAMERA_HEIGHT_M - point_3d[1]
-        floor_y = vertical * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
-        floor_x = point_3d[0]
-        rot_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
-        rot_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
-        floor_z = point_3d[2]
-        return [rot_x, rot_y, floor_z]
-
-
-    # 3. Pass 1: Get all valid depths and the average (for fallback)
-    valid_depths = []
-    for px, py in keypoint_pixels:
-        depth_val = depth_frame.get_distance(int(px), int(py))
-        if depth_val > 0.0:
-            valid_depths.append(depth_val)
-    
-    if len(valid_depths) < 2: # Require at least two valid depth readings
-        return last_direction 
-        
-    avg_depth = sum(valid_depths) / len(valid_depths)
-
-    # 4. Pass 2: Convert 2D Keypoints to 3D World Coordinates
-    for px, py in keypoint_pixels:
-        depth_val = depth_frame.get_distance(int(px), int(py))
-        
-        if depth_val == 0.0:
-            depth_val = avg_depth
-            
-        point_3d_raw = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [px, py], depth_val)
-        keypoint_3d_raw.append(project_to_floor_plane(point_3d_raw))
-        
-    LS_3D, RS_3D, LH_3D, RH_3D = keypoint_3d_raw 
-
-    # 5. Calculate Torso Plane Vectors and Normal (N)
-    V1 = [RS_3D[i] - LS_3D[i] for i in range(3)] 
-    MS = [(LS_3D[i] + RS_3D[i]) / 2 for i in range(3)]
-    MH = [(LH_3D[i] + RH_3D[i]) / 2 for i in range(3)]
-    V2 = [MH[i] - MS[i] for i in range(3)] 
-
-    N = [
-        V1[1] * V2[2] - V1[2] * V2[1], 
-        V1[2] * V2[0] - V1[0] * V2[2], 
-        V1[0] * V2[1] - V1[1] * V2[0]  
-    ]
-
-    final_dx, final_dy = N[0], N[1]
-
-    # 6. 2D Vertical Heuristic Correction
-    y_5, y_6 = keypoints[5][1], keypoints[6][1]
-    y_11, y_12 = keypoints[11][1], keypoints[12][1]
-
-    Y_L_avg = (y_5 + y_11) / 2
-    Y_R_avg = (y_6 + y_12) / 2
-
-    if (Y_L_avg < Y_R_avg - PIXEL_THRESHOLD):
-        if final_dx < 0:
-            final_dx, final_dy = -final_dx, -final_dy
-            
-    elif (Y_R_avg < Y_L_avg - PIXEL_THRESHOLD):
-        if final_dx > 0:
-            final_dx, final_dy = -final_dx, -final_dy
-    
-    # 7. Normalize and Smooth
-    norm = math.hypot(final_dx, final_dy)
+    norm = math.hypot(raw_dx, raw_dy)
     if norm == 0:
-        return last_direction
+        return prev_vec or (0, 1), prev_vec or (0, 1)
     
-    current_direction = (final_dx / norm, final_dy / norm)
+    raw_vec = (raw_dx / norm, raw_dy / norm)
 
-    # Hysteresis / Temporal Smoothing
-    smoothed_dx = (1.0 - SMOOTHING_FACTOR) * last_direction[0] + SMOOTHING_FACTOR * current_direction[0]
-    smoothed_dy = (1.0 - SMOOTHING_FACTOR) * last_direction[1] + SMOOTHING_FACTOR * current_direction[1]
+    # --- Temporal Smoothing ---
+    if prev_vec is None:
+        stable_vec = raw_vec
+    else:
+        # Ensure vectors are in the same general direction before smoothing
+        dot_product = raw_vec[0] * prev_vec[0] + raw_vec[1] * prev_vec[1]
+        if dot_product < -0.5: # Allow for some change, but flip if it's a major reversal
+            # This flip should be very rare with the new heuristics, but kept as a safeguard
+            raw_vec = (-raw_vec[0], -raw_vec[1])
+        
+        stable_dx = prev_vec[0] * (1 - smoothing_factor) + raw_vec[0] * smoothing_factor
+        stable_dy = prev_vec[1] * (1 - smoothing_factor) + raw_vec[1] * smoothing_factor
+        stable_norm = math.hypot(stable_dx, stable_dy)
+        if stable_norm == 0: return prev_vec, prev_vec # Avoid division by zero
+        stable_vec = (stable_dx / stable_norm, stable_dy / stable_norm)
 
-    smooth_norm = math.hypot(smoothed_dx, smoothed_dy)
-    if smooth_norm == 0:
-        return last_direction
+    return raw_vec, stable_vec
 
-    return (smoothed_dx / smooth_norm, smoothed_dy / smooth_norm)
 
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
     """
@@ -900,78 +892,36 @@ try:
 
                         # Helper function to get segment index to avoid code repetition
                         def get_current_segment_idx(track_id, person_pos):
-                            # person_pos is assumed to be (cx, cy) in pixel coordinates for the nose distance check
-                            # We assume cx and cy are available/defined in the external scope or derived from person_pos.
-                            cx, cy = person_pos[0], person_pos[1]
-                            
-                            # 1. Initial Checks and Setup
-                            if not args.orientation_tracking or pose_results is None or len(pose_results) == 0:
-                                return closest_wall_segment(cx, cy)
-
-                            # Use a single try/except block to catch all structural errors in the pose data access
-                            try:
-                                # Check if the primary pose result object is valid
-                                pose_result_obj = pose_results[0]
-                                if pose_result_obj.keypoints is None or pose_result_obj.keypoints.data is None:
-                                    # This is the likely source of the 'NoneType' error if keypoints were expected
-                                    print(f"[WARN] Pose keypoints object is None for ID {track_id}, using closest segment.")
-                                    return closest_wall_segment(cx, cy)
-                                    
-                                pose_keypoints_data = pose_result_obj.keypoints.data.cpu().numpy()
-                                
-                                # Check if we actually have pose data arrays
-                                if len(pose_keypoints_data) == 0:
-                                    print(f"[WARN] Empty pose keypoints array for ID {track_id}, using closest segment.")
-                                    return closest_wall_segment(cx, cy)
-
-                                # 2. Match Tracked Person to Pose Result (Closest Nose Keypoint)
+                            if args.orientation_tracking and pose_results is not None:
+                                pose_keypoints_data = pose_results[0].keypoints.data.cpu().numpy()
                                 best_pose_idx = None
                                 min_nose_dist = float('inf')
-                                
                                 for i, kps in enumerate(pose_keypoints_data):
-                                    # Check if kps is valid and has the nose keypoint (index 0) with coordinates
-                                    # A valid keypoint is expected to be [x, y, conf] or similar, hence len >= 3
-                                    if len(kps) > 0 and len(kps[0]) >= 2: 
-                                        nose_x, nose_y, _ = kps[0] # Assumes nose is index 0
-                                        dist = math.hypot(cx - nose_x, cy - nose_y)
-                                        if dist < min_nose_dist:
-                                            min_nose_dist = dist
-                                            best_pose_idx = i
-
+                                    nose_x, nose_y, _ = kps[0]
+                                    dist = math.hypot(cx - nose_x, cy - nose_y)
+                                    if dist < min_nose_dist:
+                                        min_nose_dist = dist
+                                        best_pose_idx = i
                                 if best_pose_idx is not None:
-                                    # 3. Calculate Facing Vector and Segment Index
                                     keypoints_with_conf = pose_keypoints_data[best_pose_idx]
-                                    
-                                    # Use the stabilized facing direction function (renamed here to match your call)
-                                    # Assuming get_facing_direction is your stabilized hybrid function
-                                    prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
-                                    
-                                    # NOTE: If your external facing function is named 'get_facing_direction' 
-                                    # (instead of 'get_facing_direction_hybrid_stable'), ensure it has the 
-                                    # necessary None/validity checks from our previous exchanges.
-                                    stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_stable_vec)
-                                    
-                                    # Update state
-                                    if track_id in person_states:
-                                        person_states[track_id]['facing_vec'] = stable_vec
-                                        
-                                    # Determine segment based on facing direction cone
-                                    segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
-                                    
-                                    # If cone finds nothing, fall back to closest wall
-                                    if segment_idx is None:
-                                        segment_idx = closest_wall_segment(cx, cy)
-                                        
-                                    return segment_idx
+                                    try:
+                                        prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
+                                        raw_vec, stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
+                                        if track_id in person_states:
+                                            person_states[track_id]['facing_vec'] = stable_vec
+                                        segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
+                                        # If cone finds nothing, fall back to closest
+                                        if segment_idx is None:
+                                            segment_idx = closest_wall_segment(person_pos[0], person_pos[1])
+                                        return segment_idx
+                                    except Exception as e:
+                                        print(f"[WARN] Error computing facing direction for ID {track_id}: {e}")
+                                        return closest_wall_segment(person_pos[0], person_pos[1])
                                 else:
-                                    # No matching pose found for the tracked person (min_nose_dist was never updated)
                                     print(f"[WARN] No pose keypoints matched for ID {track_id}, using closest segment.")
-                                    return closest_wall_segment(cx, cy)
-                                    
-                            except Exception as e:
-                                # Catch any structural access error (including the NoneType if it slipped through)
-                                print(f"[WARN] Error computing facing direction for ID {track_id}: {e}")
-                                return closest_wall_segment(cx, cy)
+                                    return closest_wall_segment(person_pos[0], person_pos[1])
+                            else:
+                                return closest_wall_segment(person_pos[0], person_pos[1])
 
                         if track_id not in person_states:
                             # New person detected, calculate initial segment
@@ -1104,18 +1054,13 @@ try:
                                 facing_vec = person_states.get(track_id, {}).get('facing_vec')
                                 if facing_vec is None:
                                     # Fallback if not available
-                                    facing_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics)
+                                    _, facing_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics)
                             except Exception as e:
                                 print(f"[ERROR] Facing vector calculation failed: {e}")
                                 continue
                             # Use world coordinates for cone visualization
                             # Get world position of nose
                             nose_px, nose_py = keypoints_with_conf[0][:2]
-                            if not (0 <= int(nose_px) < depth_intrinsics.width and 0 <= int(nose_py) < depth_intrinsics.height):
-                                continue # Skip this person's cone visualization if nose is out of bounds
-                            nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
-                            if nose_depth <= 0: # Also check for invalid depth
-                                continue
                             nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
                             nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
                             nose_x = nose_3d[0] + CAMERA_X_OFFSET_M
