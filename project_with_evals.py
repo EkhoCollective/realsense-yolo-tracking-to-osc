@@ -139,62 +139,125 @@ import math
 
 # ... (Imports and Global Definitions) ...
 
+import math
+# You must ensure the 'rs' library (e.g., pyrealsense2) is imported elsewhere in your script.
+
+# --- Global Constants (Define these outside the function based on your setup) ---
+# CAMERA_X_OFFSET_M = 0.0  # Horizontal offset from a defined center point
+# CAMERA_HEIGHT_M = 2.5    # Height of the camera from the floor
+# CAMERA_TILT_RADIANS = 0.52 # Tilt angle (e.g., 30 degrees)
+# CAMERA_YAW_RADIANS = 0.0   # Yaw angle
+
 def get_facing_direction(keypoints, depth_frame, depth_intrinsics, last_direction=(0.0, 1.0)):
-    # ... (Keypoint setup, PIXEL_THRESHOLD adjustment) ...
-    PIXEL_THRESHOLD = 8.0 # Increased threshold to reduce noise-induced flipping
+    """
+    Estimates facing direction (unit vector) by finding the normal vector of the 
+    torso plane in 3D world coordinates and correcting the 180-degree ambiguity
+    using 2D pixel geometry from a ceiling-mounted camera.
 
-    # ... (project_to_floor_plane helper function) ...
+    Args:
+        keypoints: YOLOv8-pose keypoints array for one person.
+        depth_frame: Depth frame object (must support .get_distance(x, y)).
+        depth_intrinsics: Camera intrinsics object (must support rs.rs2_deproject_pixel_to_point).
+        last_direction: The normalized facing vector from the previous frame (for smoothing).
+    """
+    KEYPOINTS_USED = [5, 6, 11, 12]  # L Shoulder, R Shoulder, L Hip, R Hip
+    PIXEL_THRESHOLD = 8.0            # Pixels difference required to trust the 2D depth cue
+    SMOOTHING_FACTOR = 0.2           # 0.0 (no smoothing) to 1.0 (full current direction)
 
-    # 1. Convert 2D Keypoints to 3D World Coordinates (Use helper for average depth if possible)
-    # ... (Rest of keypoint processing, resulting in LS_3D, RS_3D, LH_3D, RH_3D) ...
+    keypoint_pixels = [keypoints[i][:2] for i in KEYPOINTS_USED]
+    keypoint_3d_raw = []
 
-    # 2. Calculate Torso Plane Vectors
+    # --- Helper function for 3D Projection (Must access your global constants) ---
+    def project_to_floor_plane(point_3d):
+        """Transforms a 3D point from raw camera space to room-floor space (X, Y, Z_relative)."""
+        
+        # Apply camera offset
+        point_3d[0] += CAMERA_X_OFFSET_M
+        
+        # Projection onto floor plane using tilt
+        vertical = CAMERA_HEIGHT_M - point_3d[1]
+        floor_y = vertical * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+        floor_x = point_3d[0]
+        
+        # Apply yaw rotation
+        rot_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
+        rot_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
+        
+        # Z component (use camera Z as a relative height component)
+        floor_z = point_3d[2]
+
+        return [rot_x, rot_y, floor_z]
+
+    # 1. Pass 1: Get all valid depths and the average (for fallback)
+    valid_depths = []
+    for px, py in keypoint_pixels:
+        depth_val = depth_frame.get_distance(int(px), int(py))
+        if depth_val > 0.0:
+            valid_depths.append(depth_val)
+    
+    if not valid_depths:
+        # Cannot proceed without any depth data for the torso
+        return (0.0, 0.0)
+        
+    avg_depth = sum(valid_depths) / len(valid_depths)
+
+    # 2. Pass 2: Convert 2D Keypoints to 3D World Coordinates (Handling 0.0 depth)
+    for px, py in keypoint_pixels:
+        depth_val = depth_frame.get_distance(int(px), int(py))
+        
+        # Use fallback depth if current depth is zero
+        if depth_val == 0.0:
+            depth_val = avg_depth
+            
+        point_3d_raw = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [px, py], depth_val)
+        keypoint_3d_raw.append(project_to_floor_plane(point_3d_raw))
+        
+    LS_3D, RS_3D, LH_3D, RH_3D = keypoint_3d_raw # Variables are now guaranteed to be defined
+
+    # 3. Calculate Torso Plane Vectors
+    # V1: Across the shoulders (Right - Left)
     V1 = [RS_3D[i] - LS_3D[i] for i in range(3)] 
     
+    # V2: Down the torso (Mid-Shoulder to Mid-Hip)
     MS = [(LS_3D[i] + RS_3D[i]) / 2 for i in range(3)]
     MH = [(LH_3D[i] + RH_3D[i]) / 2 for i in range(3)]
     V2 = [MH[i] - MS[i] for i in range(3)] 
 
-    # 3. Calculate the Plane Normal Vector (Cross Product N = V1 x V2)
+    # 4. Calculate the Plane Normal Vector (Cross Product N = V1 x V2)
     N = [
         V1[1] * V2[2] - V1[2] * V2[1], # X component
         V1[2] * V2[0] - V1[0] * V2[2], # Y component
         V1[0] * V2[1] - V1[1] * V2[0]  # Z component
     ]
 
-    final_dx, final_dy = N[0], N[1] # Raw vector from 3D Normal
+    final_dx, final_dy = N[0], N[1] # Raw vector projection onto floor (XY plane)
 
-    # --- 4. 2D Vertical Heuristic Correction (Refined Tie-Breaker) ---
-
+    # 5. 2D Vertical Heuristic Correction (Tie-Breaker for 180-degree flip)
     y_5, y_6 = keypoints[5][1], keypoints[6][1]
     y_11, y_12 = keypoints[11][1], keypoints[12][1]
 
     Y_L_avg = (y_5 + y_11) / 2
     Y_R_avg = (y_6 + y_12) / 2
 
-    # Logic: If one side is clearly further away (smaller Y), enforce direction.
     if (Y_L_avg < Y_R_avg - PIXEL_THRESHOLD):
-        # Left side is further away -> Facing Camera Right (Positive X)
+        # Left side is further away (higher on screen) -> Person is facing Camera Right (Positive X)
         if final_dx < 0:
             final_dx, final_dy = -final_dx, -final_dy
             
     elif (Y_R_avg < Y_L_avg - PIXEL_THRESHOLD):
-        # Right side is further away -> Facing Camera Left (Negative X)
+        # Right side is further away (higher on screen) -> Person is facing Camera Left (Negative X)
         if final_dx > 0:
             final_dx, final_dy = -final_dx, -final_dy
     
-    # 5. Normalize the final corrected vector
+    # 6. Normalize the current corrected vector
     norm = math.hypot(final_dx, final_dy)
     if norm == 0:
-        return last_direction # Return last known direction if current vector is zero
+        return last_direction
     
     current_direction = (final_dx / norm, final_dy / norm)
 
-    # --- 6. Hysteresis / Temporal Smoothing ---
-    # Optional: Implement a low-pass filter to smooth out rapid swings
-    SMOOTHING_FACTOR = 0.2 # Adjust this: 0.0 is no smoothing, 1.0 is full current direction
-    
-    # Simple linear interpolation for smoothing
+    # 7. Hysteresis / Temporal Smoothing
+    # Linearly interpolate between the last known direction and the current direction
     smoothed_dx = (1.0 - SMOOTHING_FACTOR) * last_direction[0] + SMOOTHING_FACTOR * current_direction[0]
     smoothed_dy = (1.0 - SMOOTHING_FACTOR) * last_direction[1] + SMOOTHING_FACTOR * current_direction[1]
 
@@ -202,10 +265,7 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics, last_directio
     if smooth_norm == 0:
         return last_direction
 
-    # Ensure the output is also normalized
     return (smoothed_dx / smooth_norm, smoothed_dy / smooth_norm)
-
-# You must pass the previous frame's result as `last_direction` in your tracking loop.
 
 
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
