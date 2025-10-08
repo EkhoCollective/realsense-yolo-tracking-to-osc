@@ -199,40 +199,33 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
         # Only one eye = profile/angled, but still helps determine direction
         confidence_score += 1  # Slight bias toward facing camera
     
-
-    # Check 3: Ear visibility (one ear = profile view, two ears = facing toward/away)
+    # Check 3: Ear visibility (ears more visible when facing away)
     left_ear_visible = left_ear_conf > conf_threshold and 0 <= left_ear_px < frame_width and 0 <= left_ear_py < frame_height
     right_ear_visible = right_ear_conf > conf_threshold and 0 <= right_ear_px < frame_width and 0 <= right_ear_py < frame_height
-
+    
     ear_count = sum([left_ear_visible, right_ear_visible])
-    if ear_count == 1:
-    # One ear visible = profile view, strong indicator of NOT facing camera
+    if ear_count >= 2:
+        # Both ears visible = likely facing away or strongly angled
         confidence_score -= 3
-    elif ear_count == 0:
-    # No ears detected = inconclusive (pose detection limitation)
-        confidence_score += 0
-    # Two ears visible is neutral - could be facing toward OR away
+    elif ear_count == 1:
+        # One ear visible = angled, slight bias toward away
+        confidence_score -= 1
     
     # Check 4: Nose position relative to shoulder center (secondary check)
     # For downward camera, this is less reliable but can help
     if nose_conf > conf_threshold and 0 <= nose_px < frame_width and 0 <= nose_py < frame_height:
-    # Nose visible = strong indicator of facing camera
-        confidence_score += 2
-        
-        # Also check nose position relative to shoulder center (refinement)
+        # Calculate if nose is "in front of" or "behind" shoulder line
         shoulder_vec_2d = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
         nose_vec_2d = (nose_px - shoulder_center_px, nose_py - shoulder_center_py)
         cross_product = shoulder_vec_2d[0] * nose_vec_2d[1] - shoulder_vec_2d[1] * nose_vec_2d[0]
         
-        # For downward camera, cross product can refine the estimate
-        if abs(cross_product) > 10:  # Add threshold to avoid noise
-            if cross_product < -10:
-                confidence_score += 1  # Nose appears "above" shoulder line
-            else:
-                confidence_score -= 1  # Nose appears "below" shoulder line
-    else:
-        confidence_score -= 3  # Nose not visible = likely facing away
-
+        # For downward camera, negative cross = nose appears "above" shoulder line
+        # This is a weak indicator, so only ±1 point
+        if cross_product < -10:  # Add threshold to avoid noise
+            confidence_score += 1
+        elif cross_product > 10:
+            confidence_score -= 1
+    
     # Check 5: Hip visibility (additional verification)
     # Hips visible = more complete body visible = likely facing camera
     left_hip_visible = left_hip_conf > conf_threshold and 0 <= left_hip_px < frame_width and 0 <= left_hip_py < frame_height
@@ -364,6 +357,50 @@ def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.c
             best_idx = idx
     
     return best_idx
+
+def get_all_walls_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle, top_n=None):
+    """
+    Returns a list of all wall segment indices within the person's cone of vision.
+    If top_n is specified, first filters to the top N closest segments by distance.
+    person_pos: (x, y) in world coordinates
+    facing_vec: (dx, dy) unit vector
+    wall_segments: list of (x, y)
+    cone_angle_deg: cone angle in degrees
+    top_n: number of closest segments to consider before applying orientation filter
+    """
+    cone_angle_rad = math.radians(cone_angle_deg / 2)
+    
+    # First, calculate distances to all segments
+    segment_distances = []
+    for idx, (wx, wy) in enumerate(wall_segments):
+        if wx is None or wy is None:
+            continue
+        vec_to_wall = (wx - person_pos[0], wy - person_pos[1])
+        dist = math.hypot(*vec_to_wall)
+        segment_distances.append((idx, dist))
+    
+    # If top_n is specified, filter to top N closest segments
+    if top_n is not None and top_n > 0:
+        segment_distances.sort(key=lambda x: x[1])
+        candidate_segments = segment_distances[:top_n]
+    else:
+        candidate_segments = segment_distances
+    
+    # Collect all segments within the cone
+    segments_in_cone = []
+    
+    for idx, dist in candidate_segments:
+        wx, wy = wall_segments[idx]
+        vec_to_wall = (wx - person_pos[0], wy - person_pos[1])
+        if dist == 0:
+            continue
+        vec_to_wall_norm = (vec_to_wall[0] / dist, vec_to_wall[1] / dist)
+        dot = facing_vec[0] * vec_to_wall_norm[0] + facing_vec[1] * vec_to_wall_norm[1]
+        angle = math.acos(max(-1, min(1, dot)))
+        if angle < cone_angle_rad:
+            segments_in_cone.append(idx)
+    
+    return segments_in_cone
 
 # --- Helper function for Grid Visualization ---
 def draw_grid_visualization(occupied_cells):
@@ -1156,9 +1193,20 @@ try:
             if args.project_all:
                 # Project-all mode: collect all segments within any person's cone
                 for tid, state in person_states.items():
-                    segment_idx = state.get('segment')
-                    if segment_idx is not None:
-                        still_segments.add(segment_idx)
+                    facing_vec = state.get('facing_vec')
+                    if facing_vec is None:
+                        # Fallback to single closest segment
+                        segment_idx = state.get('segment')
+                        if segment_idx is not None:
+                            still_segments.add(segment_idx)
+                    else:
+                        # Get person's world position
+                        current_cell = state.get('current_cell')
+                        if current_cell is not None:
+                            person_pos = (current_cell[0] + 0.5, current_cell[1] + 0.5)  # Center of grid cell
+                            # Get all segments within cone
+                            segments_in_cone = get_all_walls_in_cone(person_pos, facing_vec, WALL_SEGMENTS, top_n=args.top_n_segments)
+                            still_segments.update(segments_in_cone)
             else:
                 # Normal mode: only segments where people are still
                 for tid, state in person_states.items():
