@@ -900,36 +900,78 @@ try:
 
                         # Helper function to get segment index to avoid code repetition
                         def get_current_segment_idx(track_id, person_pos):
-                            if args.orientation_tracking and pose_results is not None:
-                                pose_keypoints_data = pose_results[0].keypoints.data.cpu().numpy()
+                            # person_pos is assumed to be (cx, cy) in pixel coordinates for the nose distance check
+                            # We assume cx and cy are available/defined in the external scope or derived from person_pos.
+                            cx, cy = person_pos[0], person_pos[1]
+                            
+                            # 1. Initial Checks and Setup
+                            if not args.orientation_tracking or pose_results is None or len(pose_results) == 0:
+                                return closest_wall_segment(cx, cy)
+
+                            # Use a single try/except block to catch all structural errors in the pose data access
+                            try:
+                                # Check if the primary pose result object is valid
+                                pose_result_obj = pose_results[0]
+                                if pose_result_obj.keypoints is None or pose_result_obj.keypoints.data is None:
+                                    # This is the likely source of the 'NoneType' error if keypoints were expected
+                                    print(f"[WARN] Pose keypoints object is None for ID {track_id}, using closest segment.")
+                                    return closest_wall_segment(cx, cy)
+                                    
+                                pose_keypoints_data = pose_result_obj.keypoints.data.cpu().numpy()
+                                
+                                # Check if we actually have pose data arrays
+                                if len(pose_keypoints_data) == 0:
+                                    print(f"[WARN] Empty pose keypoints array for ID {track_id}, using closest segment.")
+                                    return closest_wall_segment(cx, cy)
+
+                                # 2. Match Tracked Person to Pose Result (Closest Nose Keypoint)
                                 best_pose_idx = None
                                 min_nose_dist = float('inf')
+                                
                                 for i, kps in enumerate(pose_keypoints_data):
-                                    nose_x, nose_y, _ = kps[0]
-                                    dist = math.hypot(cx - nose_x, cy - nose_y)
-                                    if dist < min_nose_dist:
-                                        min_nose_dist = dist
-                                        best_pose_idx = i
+                                    # Check if kps is valid and has the nose keypoint (index 0) with coordinates
+                                    # A valid keypoint is expected to be [x, y, conf] or similar, hence len >= 3
+                                    if len(kps) > 0 and len(kps[0]) >= 2: 
+                                        nose_x, nose_y, _ = kps[0] # Assumes nose is index 0
+                                        dist = math.hypot(cx - nose_x, cy - nose_y)
+                                        if dist < min_nose_dist:
+                                            min_nose_dist = dist
+                                            best_pose_idx = i
+
                                 if best_pose_idx is not None:
+                                    # 3. Calculate Facing Vector and Segment Index
                                     keypoints_with_conf = pose_keypoints_data[best_pose_idx]
-                                    try:
-                                        prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
-                                        stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_stable_vec)
-                                        if track_id in person_states:
-                                            person_states[track_id]['facing_vec'] = stable_vec
-                                        segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
-                                        # If cone finds nothing, fall back to closest
-                                        if segment_idx is None:
-                                            segment_idx = closest_wall_segment(person_pos[0], person_pos[1])
-                                        return segment_idx
-                                    except Exception as e:
-                                        print(f"[WARN] Error computing facing direction for ID {track_id}: {e}")
-                                        return closest_wall_segment(person_pos[0], person_pos[1])
+                                    
+                                    # Use the stabilized facing direction function (renamed here to match your call)
+                                    # Assuming get_facing_direction is your stabilized hybrid function
+                                    prev_stable_vec = person_states.get(track_id, {}).get('facing_vec')
+                                    
+                                    # NOTE: If your external facing function is named 'get_facing_direction' 
+                                    # (instead of 'get_facing_direction_hybrid_stable'), ensure it has the 
+                                    # necessary None/validity checks from our previous exchanges.
+                                    stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_stable_vec)
+                                    
+                                    # Update state
+                                    if track_id in person_states:
+                                        person_states[track_id]['facing_vec'] = stable_vec
+                                        
+                                    # Determine segment based on facing direction cone
+                                    segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
+                                    
+                                    # If cone finds nothing, fall back to closest wall
+                                    if segment_idx is None:
+                                        segment_idx = closest_wall_segment(cx, cy)
+                                        
+                                    return segment_idx
                                 else:
+                                    # No matching pose found for the tracked person (min_nose_dist was never updated)
                                     print(f"[WARN] No pose keypoints matched for ID {track_id}, using closest segment.")
-                                    return closest_wall_segment(person_pos[0], person_pos[1])
-                            else:
-                                return closest_wall_segment(person_pos[0], person_pos[1])
+                                    return closest_wall_segment(cx, cy)
+                                    
+                            except Exception as e:
+                                # Catch any structural access error (including the NoneType if it slipped through)
+                                print(f"[WARN] Error computing facing direction for ID {track_id}: {e}")
+                                return closest_wall_segment(cx, cy)
 
                         if track_id not in person_states:
                             # New person detected, calculate initial segment
