@@ -134,9 +134,9 @@ else:
 
 
 
-MIN_KEYPOINT_CONFIDENCE = 0.3 
 
-# ... (Helper function project_to_floor_plane remains the same) ...
+
+MIN_KEYPOINT_CONFIDENCE = 0.3 
 
 def get_facing_direction(keypoints, depth_frame, depth_intrinsics, last_direction=(0.0, 1.0)):
     """
@@ -144,23 +144,21 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics, last_directio
     and minimum confidence/visibility.
     """
     
-    # 1. CRITICAL INITIAL CHECK (Handles NoneType)
-    if keypoints is None or not isinstance(keypoints, (list, tuple)) or len(keypoints) < 13:
-        # Check for None, check structure type, and ensure at least L/R Hip (index 12) exists
-        return last_direction
-        
     KEYPOINTS_USED = [5, 6, 11, 12]  # L Shoulder, R Shoulder, L Hip, R Hip
     PIXEL_THRESHOLD = 8.0            
     SMOOTHING_FACTOR = 0.2           
-    
-    # 2. Keypoint Confidence Validation
-    # Ensure all four critical points have sufficient confidence/visibility.
+
+    # 1. CRITICAL INITIAL CHECK (Handles NoneType, empty list, and too-short list)
+    # The error 'NoneType' object is not subscriptable means keypoints is None.
+    # The len(keypoints) check handles cases where the tracking returns [] or a truncated list.
+    if keypoints is None or not isinstance(keypoints, (list, tuple)) or len(keypoints) < max(KEYPOINTS_USED) + 1:
+        return last_direction
+        
+    # 2. Keypoint Confidence and Validity Check
     for i in KEYPOINTS_USED:
-        # Check if the keypoint array for this index is valid and has sufficient confidence
-        # Keypoint data is often [x, y, confidence]
-        if len(keypoints[i]) < 3 or keypoints[i][2] < MIN_KEYPOINT_CONFIDENCE:
-            # One of the core points is missing or has low confidence, abort calculation
-            # This is the most likely fix for when a person turns around.
+        # Check if the keypoint entry itself might be None, or too short (i.e., less than [x, y, conf])
+        # This prevents the error if the list keypoints[i] is None or short.
+        if keypoints[i] is None or len(keypoints[i]) < 3 or keypoints[i][2] < MIN_KEYPOINT_CONFIDENCE:
             return last_direction
 
     keypoint_pixels = [keypoints[i][:2] for i in KEYPOINTS_USED]
@@ -169,35 +167,29 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics, last_directio
     # --- Helper function for 3D Projection (Assumes access to global constants) ---
     def project_to_floor_plane(point_3d):
         """Transforms a 3D point from raw camera space to room-floor space (X, Y, Z_relative)."""
-        # Note: You MUST ensure CAMERA_X_OFFSET_M, CAMERA_HEIGHT_M, CAMERA_TILT_RADIANS, 
-        # and CAMERA_YAW_RADIANS are available in this scope (e.g., globals).
-        
         point_3d[0] += CAMERA_X_OFFSET_M
         vertical = CAMERA_HEIGHT_M - point_3d[1]
         floor_y = vertical * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
         floor_x = point_3d[0]
-        
         rot_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
         rot_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
-        
         floor_z = point_3d[2]
         return [rot_x, rot_y, floor_z]
 
 
     # 3. Pass 1: Get all valid depths and the average (for fallback)
-    # The pixel coordinates used here are already validated in Step 2.
     valid_depths = []
     for px, py in keypoint_pixels:
         depth_val = depth_frame.get_distance(int(px), int(py))
         if depth_val > 0.0:
             valid_depths.append(depth_val)
     
-    if len(valid_depths) < 2: # Require at least two valid depth readings for a stable average
+    if len(valid_depths) < 2: # Require at least two valid depth readings
         return last_direction 
         
     avg_depth = sum(valid_depths) / len(valid_depths)
 
-    # 4. Pass 2: Convert 2D Keypoints to 3D World Coordinates (Using average depth fallback)
+    # 4. Pass 2: Convert 2D Keypoints to 3D World Coordinates
     for px, py in keypoint_pixels:
         depth_val = depth_frame.get_distance(int(px), int(py))
         
@@ -223,7 +215,7 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics, last_directio
 
     final_dx, final_dy = N[0], N[1]
 
-    # 6. 2D Vertical Heuristic Correction (Tie-Breaker for 180-degree flip)
+    # 6. 2D Vertical Heuristic Correction
     y_5, y_6 = keypoints[5][1], keypoints[6][1]
     y_11, y_12 = keypoints[11][1], keypoints[12][1]
 
