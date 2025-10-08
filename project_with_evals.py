@@ -199,33 +199,40 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
         # Only one eye = profile/angled, but still helps determine direction
         confidence_score += 1  # Slight bias toward facing camera
     
-    # Check 3: Ear visibility (ears more visible when facing away)
+
+    # Check 3: Ear visibility (one ear = profile view, two ears = facing toward/away)
     left_ear_visible = left_ear_conf > conf_threshold and 0 <= left_ear_px < frame_width and 0 <= left_ear_py < frame_height
     right_ear_visible = right_ear_conf > conf_threshold and 0 <= right_ear_px < frame_width and 0 <= right_ear_py < frame_height
-    
+
     ear_count = sum([left_ear_visible, right_ear_visible])
-    if ear_count >= 2:
-        # Both ears visible = likely facing away or strongly angled
+    if ear_count == 1:
+    # One ear visible = profile view, strong indicator of NOT facing camera
         confidence_score -= 3
-    elif ear_count == 1:
-        # One ear visible = angled, slight bias toward away
-        confidence_score -= 1
+    elif ear_count == 0:
+    # No ears detected = inconclusive (pose detection limitation)
+        confidence_score += 0
+    # Two ears visible is neutral - could be facing toward OR away
     
     # Check 4: Nose position relative to shoulder center (secondary check)
     # For downward camera, this is less reliable but can help
     if nose_conf > conf_threshold and 0 <= nose_px < frame_width and 0 <= nose_py < frame_height:
-        # Calculate if nose is "in front of" or "behind" shoulder line
+    # Nose visible = strong indicator of facing camera
+        confidence_score += 2
+        
+        # Also check nose position relative to shoulder center (refinement)
         shoulder_vec_2d = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
         nose_vec_2d = (nose_px - shoulder_center_px, nose_py - shoulder_center_py)
         cross_product = shoulder_vec_2d[0] * nose_vec_2d[1] - shoulder_vec_2d[1] * nose_vec_2d[0]
         
-        # For downward camera, negative cross = nose appears "above" shoulder line
-        # This is a weak indicator, so only ±1 point
-        if cross_product < -10:  # Add threshold to avoid noise
-            confidence_score += 1
-        elif cross_product > 10:
-            confidence_score -= 1
-    
+        # For downward camera, cross product can refine the estimate
+        if abs(cross_product) > 10:  # Add threshold to avoid noise
+            if cross_product < -10:
+                confidence_score += 1  # Nose appears "above" shoulder line
+            else:
+                confidence_score -= 1  # Nose appears "below" shoulder line
+    else:
+        confidence_score -= 3  # Nose not visible = likely facing away
+
     # Check 5: Hip visibility (additional verification)
     # Hips visible = more complete body visible = likely facing camera
     left_hip_visible = left_hip_conf > conf_threshold and 0 <= left_hip_px < frame_width and 0 <= left_hip_py < frame_height
