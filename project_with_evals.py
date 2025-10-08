@@ -160,6 +160,9 @@ def get_facing_direction(keypoints, depth_frame, depth_intrinsics, last_directio
         depth_intrinsics: Camera intrinsics object (must support rs.rs2_deproject_pixel_to_point).
         last_direction: The normalized facing vector from the previous frame (for smoothing).
     """
+    if keypoints is None:
+        # If the tracking failed for this ID, return the last known direction for stability
+        return last_direction
     KEYPOINTS_USED = [5, 6, 11, 12]  # L Shoulder, R Shoulder, L Hip, R Hip
     PIXEL_THRESHOLD = 8.0            # Pixels difference required to trust the 2D depth cue
     SMOOTHING_FACTOR = 0.2           # 0.0 (no smoothing) to 1.0 (full current direction)
