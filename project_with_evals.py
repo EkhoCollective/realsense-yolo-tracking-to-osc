@@ -1060,37 +1060,40 @@ try:
                                 continue
                             # Use world coordinates for cone visualization
                             # Get world position of nose
-                            nose_px, nose_py = keypoints_with_conf[0][:2]
-                            nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
-                            nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
-                            nose_x = nose_3d[0] + CAMERA_X_OFFSET_M
-                            nose_y = CAMERA_HEIGHT_M - nose_3d[1]
-                            nose_z = nose_3d[2]
-                            nose_floor_y = nose_y * math.tan(CAMERA_TILT_RADIANS) + nose_z * math.cos(CAMERA_TILT_RADIANS)
-                            nose_rot_x = nose_x * math.cos(CAMERA_YAW_RADIANS) - nose_floor_y * math.sin(CAMERA_YAW_RADIANS)
-                            nose_rot_y = nose_x * math.sin(CAMERA_YAW_RADIANS) + nose_floor_y * math.cos(CAMERA_YAW_RADIANS)
-                            # Draw cone in grid visualization
-                            cone_length = 5  # meters
-                            cone_angle = args.cone_angle
-                            angle_rad = math.atan2(facing_vec[1], facing_vec[0])
-                            left_angle = angle_rad - math.radians(cone_angle / 2)
-                            right_angle = angle_rad + math.radians(cone_angle / 2)
-                            left_x = nose_rot_x + cone_length * math.cos(left_angle)
-                            left_y = nose_rot_y + cone_length * math.sin(left_angle)
-                            right_x = nose_rot_x + cone_length * math.cos(right_angle)
-                            right_y = nose_rot_y + cone_length * math.sin(right_angle)
-                            # Convert to grid pixels
-                            center_pixel_x = GRID_PIXELS // 2
-                            center_pixel_y = GRID_PIXELS // 2
-                            nose_px_grid = int(center_pixel_x + nose_rot_x * CELL_PIXELS)
-                            nose_py_grid = int(center_pixel_y - nose_rot_y * CELL_PIXELS)
-                            left_px_grid = int(center_pixel_x + left_x * CELL_PIXELS)
-                            left_py_grid = int(center_pixel_y - left_y * CELL_PIXELS)
-                            right_px_grid = int(center_pixel_x + right_x * CELL_PIXELS)
-                            right_py_grid = int(center_pixel_y - right_y * CELL_PIXELS)
-                            pts = np.array([[nose_px_grid, nose_py_grid], [left_px_grid, left_py_grid], [right_px_grid, right_py_grid]], np.int32)
-                            cv2.polylines(stopped_grid_image, [pts], isClosed=True, color=(255, 200, 0), thickness=2)
-
+                            try:
+                                nose_px, nose_py = keypoints_with_conf[0][:2]
+                                nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
+                                nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
+                                nose_x = nose_3d[0] + CAMERA_X_OFFSET_M
+                                nose_y = CAMERA_HEIGHT_M - nose_3d[1]
+                                nose_z = nose_3d[2]
+                                nose_floor_y = nose_y * math.tan(CAMERA_TILT_RADIANS) + nose_z * math.cos(CAMERA_TILT_RADIANS)
+                                nose_rot_x = nose_x * math.cos(CAMERA_YAW_RADIANS) - nose_floor_y * math.sin(CAMERA_YAW_RADIANS)
+                                nose_rot_y = nose_x * math.sin(CAMERA_YAW_RADIANS) + nose_floor_y * math.cos(CAMERA_YAW_RADIANS)
+                                # Draw cone in grid visualization
+                                cone_length = 5  # meters
+                                cone_angle = args.cone_angle
+                                angle_rad = math.atan2(facing_vec[1], facing_vec[0])
+                                left_angle = angle_rad - math.radians(cone_angle / 2)
+                                right_angle = angle_rad + math.radians(cone_angle / 2)
+                                left_x = nose_rot_x + cone_length * math.cos(left_angle)
+                                left_y = nose_rot_y + cone_length * math.sin(left_angle)
+                                right_x = nose_rot_x + cone_length * math.cos(right_angle)
+                                right_y = nose_rot_y + cone_length * math.sin(right_angle)
+                                # Convert to grid pixels
+                                center_pixel_x = GRID_PIXELS // 2
+                                center_pixel_y = GRID_PIXELS // 2
+                                nose_px_grid = int(center_pixel_x + nose_rot_x * CELL_PIXELS)
+                                nose_py_grid = int(center_pixel_y - nose_rot_y * CELL_PIXELS)
+                                left_px_grid = int(center_pixel_x + left_x * CELL_PIXELS)
+                                left_py_grid = int(center_pixel_y - left_y * CELL_PIXELS)
+                                right_px_grid = int(center_pixel_x + right_x * CELL_PIXELS)
+                                right_py_grid = int(center_pixel_y - right_y * CELL_PIXELS)
+                                pts = np.array([[nose_px_grid, nose_py_grid], [left_px_grid, left_py_grid], [right_px_grid, right_py_grid]], np.int32)
+                                cv2.polylines(stopped_grid_image, [pts], isClosed=True, color=(255, 200, 0), thickness=2)
+                            except Exception as e:
+                                print(f"[ERROR] Nose position calculation failed: {e}")
+                                continue
         # --- Window Display and Control ---
         if show_window:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
