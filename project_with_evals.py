@@ -523,6 +523,9 @@ def sample_wall_vertical_lines(depth_frame, depth_intrinsics, num_lines=20, min_
     img_h = depth_intrinsics.height
     wall_curve = []
     wall_pixels = []
+    # Check if we're in replay mode by checking if intrinsics has deproject method
+    is_replay = hasattr(depth_intrinsics, 'deproject')
+    
     for i in range(num_lines):
         x = int((img_w - 1) * (i / (num_lines - 1)))
         max_depth = 0
@@ -535,7 +538,10 @@ def sample_wall_vertical_lines(depth_frame, depth_intrinsics, num_lines=20, min_
                 max_depth = depth
                 best_y = y
         if max_depth > 0 and best_y is not None:
-            pt_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x, best_y], max_depth)
+            if is_replay:
+                pt_3d = depth_intrinsics.deproject([x, best_y], max_depth)
+            else:
+                pt_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x, best_y], max_depth)
             wall_curve.append((pt_3d[0] + CAMERA_X_OFFSET_M, pt_3d[2]))
             wall_pixels.append((x, best_y))
         else:
@@ -876,7 +882,14 @@ try:
                     self.fy = 616.285
                     self.ppx = w / 2
                     self.ppy = h / 2
-            
+                
+                def deproject(self, pixel, depth):
+                    """Manual deprojection for replay mode"""
+                    x = (pixel[0] - self.ppx) / self.fx * depth
+                    y = (pixel[1] - self.ppy) / self.fy * depth
+                    z = depth
+                    return [x, y, z]
+
             mock_intrinsics = MockIntrinsics(depth_image.shape[1], depth_image.shape[0])
             depth_frame = MockDepthFrame(depth_image, mock_intrinsics, depth_scale)
             depth_frame.intrinsics = mock_intrinsics  # Add as attribute for compatibility
@@ -964,7 +977,11 @@ try:
                     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                     distance_m = depth_frame.get_distance(cx, cy)
                     if 0 < distance_m < 10:
-                        point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], distance_m)
+                        # Use different deprojection method based on mode
+                        if args.replay_path:
+                            point_3d = depth_intrinsics.deproject([cx, cy], distance_m)
+                        else:
+                            point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], distance_m)
                         vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
                         floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
                         floor_x = point_3d[0] + CAMERA_X_OFFSET_M
@@ -1151,7 +1168,11 @@ try:
                             try:
                                 nose_px, nose_py = keypoints_with_conf[0][:2]
                                 nose_depth = depth_frame.get_distance(int(nose_px), int(nose_py))
-                                nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
+                                # Use different deprojection method based on mode
+                                if args.replay_path:
+                                    nose_3d = depth_intrinsics.deproject([nose_px, nose_py], nose_depth)
+                                else:
+                                    nose_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nose_px, nose_py], nose_depth)
                                 nose_x = nose_3d[0] + CAMERA_X_OFFSET_M
                                 nose_y = CAMERA_HEIGHT_M - nose_3d[1]
                                 nose_z = nose_3d[2]
