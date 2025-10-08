@@ -842,44 +842,65 @@ try:
 
     frame_counter = 0
     while True:
+        # Fetch frame data
         if args.replay_path:
-            color_image, depth_image = get_next_frame()
-            if color_image is None or depth_image is None:
+            if replay_idx >= len(rgb_files):
                 break
-            else:
-                frame_counter += 1
+            color_image = cv2.imread(os.path.join(args.replay_path, rgb_files[replay_idx]))
+            depth_image = np.load(os.path.join(args.replay_path, depth_files[replay_idx]))
+            
+            # Create mock depth frame wrapper
+            class MockDepthFrame:
+                def __init__(self, depth_array, intrinsics, scale):
+                    self.data = depth_array
+                    self.intrinsics_obj = intrinsics
+                    self.scale = scale
+                
+                def get_distance(self, x, y):
+                    if 0 <= y < self.data.shape[0] and 0 <= x < self.data.shape[1]:
+                        return self.data[y, x] * self.scale
+                    return 0
+                
+                def profile(self):
+                    return self
+                
+                def as_video_stream_profile(self):
+                    return self
+            
+            class MockIntrinsics:
+                def __init__(self, w, h):
+                    self.width = w
+                    self.height = h
+                    # Use typical RealSense D435 intrinsics as defaults
+                    self.fx = 616.285
+                    self.fy = 616.285
+                    self.ppx = w / 2
+                    self.ppy = h / 2
+            
+            mock_intrinsics = MockIntrinsics(depth_image.shape[1], depth_image.shape[0])
+            depth_frame = MockDepthFrame(depth_image, mock_intrinsics, depth_scale)
+            depth_frame.intrinsics = mock_intrinsics  # Add as attribute for compatibility
+            
+            frame_counter += 1
             replay_idx += 1
-            # You may need to mock depth_frame/color_frame objects if you use RealSense API calls
-            # Otherwise, adapt your code to use numpy arrays directly
         else:
             frames = pipeline.wait_for_frames()
             aligned_frames = align.process(frames)
             depth_frame = aligned_frames.get_depth_frame()
             color_frame = aligned_frames.get_color_frame()
+            
             if not depth_frame or not color_frame:
                 continue
+            
             color_image = np.asanyarray(color_frame.get_data())
-            depth_image = np.asanyarray(depth_frame.get_data())
-        # ...rest of your tracking code using color_image and depth_image...
 
         # Initialize a set for the current frame's grid cells for visualization
         current_frame_grid_cells = set()
-        # Unified set for cells of people confirmed to be "still"
         still_cells = set()
-        still_segments = set()  # Use this for wall segments
+        still_segments = set()
 
-        # Wait for a new set of frames from the camera and align them
-        frames = pipeline.wait_for_frames()
-        aligned_frames = align.process(frames)
-
-        depth_frame = aligned_frames.get_depth_frame()
-        color_frame = aligned_frames.get_color_frame()
-
-        if not depth_frame or not color_frame:
-            continue
-
-        # Get camera intrinsics for coordinate mapping
-        depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
+        # Get depth intrinsics (use the one from depth_frame for both modes)
+        depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics if not args.replay_path else depth_frame.intrinsics
 
         # Convert the color frame to a numpy array (OpenCV format)
         color_image = np.asanyarray(color_frame.get_data())
