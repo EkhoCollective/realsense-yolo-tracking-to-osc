@@ -39,6 +39,7 @@ parser.add_argument("--cone-angle", type=float, default=75, help="Cone angle in 
 parser.add_argument("--occlusion-forgiveness", type=float, default=3.0, help="Seconds to retain an occluded person's state before removal.")
 parser.add_argument("--top-n-segments", type=int, default=3, help="Number of closest segments to consider before applying orientation filter")
 parser.add_argument("--reverse-osc", action="store_true", help="Reverse OSC signal (0 becomes 1, 1 becomes 0)")
+parser.add_argument("--project-all", action="store_true", help="Project to all wall segments within any vision cone (ignores stillness)")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -1142,13 +1143,21 @@ try:
 
             person_states = active_person_states
             
-            # --- Determine still segments from the remaining active states ---
+            # --- Determine active segments based on mode ---
             still_segments.clear() # Clear before recalculating
-            for tid, state in person_states.items():
-                is_still = (current_time - state['still_since']) > STILLNESS_DURATION
-                if is_still:
-                    still_segments.add(state['segment'])
-
+            
+            if args.project_all:
+                # Project-all mode: collect all segments within any person's cone
+                for tid, state in person_states.items():
+                    segment_idx = state.get('segment')
+                    if segment_idx is not None:
+                        still_segments.add(segment_idx)
+            else:
+                # Normal mode: only segments where people are still
+                for tid, state in person_states.items():
+                    is_still = (current_time - state['still_since']) > STILLNESS_DURATION
+                    if is_still:
+                        still_segments.add(state['segment'])
 
             osc_list = [1 if idx in still_segments else 0 for idx in range(WALL_IDX_OFFSET, NUM_SEGMENTS)]
             
