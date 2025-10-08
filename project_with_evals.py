@@ -37,6 +37,7 @@ parser.add_argument("--osc-log", type=str, default=None, help="Path to log OSC o
 parser.add_argument("--orientation-tracking", action="store_true", help="Enable orientation tracking using pose estimation")
 parser.add_argument("--cone-angle", type=float, default=75, help="Cone angle in degrees for orientation-based wall segment assignment")
 parser.add_argument("--occlusion-forgiveness", type=float, default=3.0, help="Seconds to retain an occluded person's state before removal.")
+parser.add_argument("--top-n-segments", type=int, default=3, help="Number of closest segments to consider before applying orientation filter")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -309,22 +310,41 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
 
 
 
-def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle):
+def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle, top_n=None):
     """
     Returns the index of the nearest wall segment within the person's cone of vision.
+    If top_n is specified, first filters to the top N closest segments by distance.
     person_pos: (x, y) in world coordinates
     facing_vec: (dx, dy) unit vector
     wall_segments: list of (x, y)
     cone_angle_deg: cone angle in degrees
+    top_n: number of closest segments to consider before applying orientation filter
     """
     cone_angle_rad = math.radians(cone_angle_deg / 2)
-    best_idx = None
-    min_dist = float('inf')
+    
+    # First, calculate distances to all segments
+    segment_distances = []
     for idx, (wx, wy) in enumerate(wall_segments):
         if wx is None or wy is None:
             continue
         vec_to_wall = (wx - person_pos[0], wy - person_pos[1])
         dist = math.hypot(*vec_to_wall)
+        segment_distances.append((idx, dist))
+    
+    # If top_n is specified, filter to top N closest segments
+    if top_n is not None and top_n > 0:
+        segment_distances.sort(key=lambda x: x[1])
+        candidate_segments = segment_distances[:top_n]
+    else:
+        candidate_segments = segment_distances
+    
+    # Now apply cone filter to the candidate segments
+    best_idx = None
+    min_dist = float('inf')
+    
+    for idx, dist in candidate_segments:
+        wx, wy = wall_segments[idx]
+        vec_to_wall = (wx - person_pos[0], wy - person_pos[1])
         if dist == 0:
             continue
         vec_to_wall_norm = (vec_to_wall[0] / dist, vec_to_wall[1] / dist)
@@ -333,6 +353,7 @@ def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.c
         if angle < cone_angle_rad and dist < min_dist:
             min_dist = dist
             best_idx = idx
+    
     return best_idx
 
 # --- Helper function for Grid Visualization ---
@@ -1014,7 +1035,7 @@ try:
                                         raw_vec, stable_vec = get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=prev_stable_vec)
                                         if track_id in person_states:
                                             person_states[track_id]['facing_vec'] = stable_vec
-                                        segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS)
+                                        segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS, top_n=args.top_n_segments)
                                         # If cone finds nothing, fall back to closest
                                         if segment_idx is None:
                                             segment_idx = closest_wall_segment(person_pos[0], person_pos[1])
