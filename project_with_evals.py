@@ -48,6 +48,8 @@ CAMERA_TILT_RADIANS = math.radians(CAMERA_TILT_DEGREES)
 CAMERA_YAW_DEGREES = args.yaw
 CAMERA_YAW_RADIANS = math.radians(CAMERA_YAW_DEGREES)
 
+W, H = args.rs_width, args.rs_height
+
 # --- OSC Configuration ---
 OSC_IP = args.ip
 OSC_PORT = args.port
@@ -70,55 +72,56 @@ GRID_ORIGIN_OFFSET = GRID_DIM_METERS // 2 # To center (0,0) in the visualization
 STICKY_CELL_DURATION = 0.5 # seconds
 
 WALL_IDX_OFFSET = args.wall_idx_offset
-
 # --- 1. RealSense Setup ---
-pipeline = rs.pipeline()
-config = rs.config()
-
-start_time = time.time()
-
-# Configure the streams for the color and depth camera
-# Choose a lower resolution (640x480) and standard FPS (30) for best performance
-W, H = args.rs_width, args.rs_height
-config.enable_stream(rs.stream.depth, W, H, rs.format.z16, 15)
-config.enable_stream(rs.stream.color, W, H, rs.format.bgr8, 15)
-
-# Start streaming
-print("[INFO] Starting RealSense pipeline...")
-profile = pipeline.start(config)
-threshold_filter = rs.threshold_filter()
-threshold_filter.set_option(rs.option.max_distance, 2.0) # 10 m maximum
-depth_sensor = profile.get_device().first_depth_sensor()
-depth_scale = depth_sensor.get_depth_scale()
-print(f"[INFO] Depth Scale is: {depth_scale}")
-
-# --- RGB Exposure Control ---
-color_sensor = None
-for sensor in profile.get_device().query_sensors():
-    if sensor.get_info(rs.camera_info.name) == 'RGB Camera':
-        color_sensor = sensor
-        break
-
-if color_sensor:
-    if args.rgb_exposure >= 0:
-        try:
-            color_sensor.set_option(rs.option.enable_auto_exposure, 0)
-            color_sensor.set_option(rs.option.exposure, args.rgb_exposure)
-            print(f"[INFO] RGB Exposure set to: {args.rgb_exposure}")
-        except Exception as e:
-            print(f"[WARNING] Could not set RGB exposure: {e}")
-    else:
-        color_sensor.set_option(rs.option.enable_auto_exposure, 1)
-        print("[INFO] RGB auto exposure enabled.")
+if args.replay_path:
+    # In replay mode, we don't need the pipeline at all
+    depth_scale = 0.001  # Standard RealSense depth scale
+    print("[INFO] Replay mode: Skipping RealSense pipeline initialization")
 else:
-    print("[WARNING] RGB camera not found.")
+    # Normal mode: Initialize RealSense pipeline
+    pipeline = rs.pipeline()
+    config = rs.config()
 
-# --- Create an align object
-# rs.align allows us to align depth frames to color frames
-align_to = rs.stream.color
-align = rs.align(align_to)
+    start_time = time.time()
 
-print("[INFO] Camera ready.")
+    # Configure the streams for the color and depth camera
+    config.enable_stream(rs.stream.depth, W, H, rs.format.z16, 15)
+    config.enable_stream(rs.stream.color, W, H, rs.format.bgr8, 15)
+    # Start streaming
+    print("[INFO] Starting RealSense pipeline...")
+    profile = pipeline.start(config)
+    threshold_filter = rs.threshold_filter()
+    threshold_filter.set_option(rs.option.max_distance, 2.0)
+    depth_sensor = profile.get_device().first_depth_sensor()
+    depth_scale = depth_sensor.get_depth_scale()
+    print(f"[INFO] Depth Scale is: {depth_scale}")
+
+    # --- RGB Exposure Control ---
+    color_sensor = None
+    for sensor in profile.get_device().query_sensors():
+        if sensor.get_info(rs.camera_info.name) == 'RGB Camera':
+            color_sensor = sensor
+            break
+
+    if color_sensor:
+        if args.rgb_exposure >= 0:
+            try:
+                color_sensor.set_option(rs.option.enable_auto_exposure, 0)
+                color_sensor.set_option(rs.option.exposure, args.rgb_exposure)
+                print(f"[INFO] RGB Exposure set to: {args.rgb_exposure}")
+            except Exception as e:
+                print(f"[WARNING] Could not set RGB exposure: {e}")
+        else:
+            color_sensor.set_option(rs.option.enable_auto_exposure, 1)
+            print("[INFO] RGB auto exposure enabled.")
+    else:
+        print("[WARNING] RGB camera not found.")
+
+    # --- Create an align object
+    align_to = rs.stream.color
+    align = rs.align(align_to)
+
+    print("[INFO] Camera ready.")
 
 # --- 2. Model Initialization ---
 # Load the ultra-efficient YOLOv8-L model
@@ -173,81 +176,69 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     # --- Multi-Factor Front/Back Detection ---
     shoulder_center_px = (left_shoulder_px + right_shoulder_px) / 2
     shoulder_center_py = (left_shoulder_py + right_shoulder_py) / 2
-    
     confidence_score = 0
-    
+
     # Check 1: Shoulder asymmetry (most reliable for standing people from above)
-    # When facing camera, shoulders appear more symmetrical in Y-axis
-    # When facing away, one shoulder often appears higher due to perspective
     shoulder_y_diff = abs(left_shoulder_py - right_shoulder_py)
     if shoulder_y_diff < 5:  # Very symmetrical = likely facing camera
         confidence_score += 2
     elif shoulder_y_diff > 15:  # Asymmetrical = likely angled or facing away
         confidence_score -= 1
-    
+
     # Check 2: Eye visibility pattern (strong indicator)
     left_eye_visible = left_eye_conf > conf_threshold and 0 <= left_eye_px < frame_width and 0 <= left_eye_py < frame_height
     right_eye_visible = right_eye_conf > conf_threshold and 0 <= right_eye_px < frame_width and 0 <= right_eye_py < frame_height
-    
     if left_eye_visible and right_eye_visible:
-        # Both eyes visible = facing camera
         confidence_score += 3
     elif not left_eye_visible and not right_eye_visible:
-        # No eyes visible = facing away
         confidence_score -= 3
     elif left_eye_visible != right_eye_visible:
-        # Only one eye = profile/angled, but still helps determine direction
         confidence_score += 1  # Slight bias toward facing camera
-    
-    # Check 3: Ear visibility (ears more visible when facing away)
+
+    # Check 3: Ear visibility (one ear = profile view, two ears = facing toward/away)
     left_ear_visible = left_ear_conf > conf_threshold and 0 <= left_ear_px < frame_width and 0 <= left_ear_py < frame_height
     right_ear_visible = right_ear_conf > conf_threshold and 0 <= right_ear_px < frame_width and 0 <= right_ear_py < frame_height
-    
     ear_count = sum([left_ear_visible, right_ear_visible])
-    if ear_count >= 2:
-        # Both ears visible = likely facing away or strongly angled
+    if ear_count == 1:
         confidence_score -= 3
-    elif ear_count == 1:
-        # One ear visible = angled, slight bias toward away
-        confidence_score -= 1
-    
+    elif ear_count == 0:
+        confidence_score += 0
+    # Two ears visible is neutral
+
     # Check 4: Nose position relative to shoulder center (secondary check)
-    # For downward camera, this is less reliable but can help
     if nose_conf > conf_threshold and 0 <= nose_px < frame_width and 0 <= nose_py < frame_height:
-        # Calculate if nose is "in front of" or "behind" shoulder line
+        confidence_score += 2
         shoulder_vec_2d = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
         nose_vec_2d = (nose_px - shoulder_center_px, nose_py - shoulder_center_py)
         cross_product = shoulder_vec_2d[0] * nose_vec_2d[1] - shoulder_vec_2d[1] * nose_vec_2d[0]
-        
-        # For downward camera, negative cross = nose appears "above" shoulder line
-        # This is a weak indicator, so only ±1 point
-        if cross_product < -10:  # Add threshold to avoid noise
-            confidence_score += 1
-        elif cross_product > 10:
-            confidence_score -= 1
-    
+        if abs(cross_product) > 10:
+            if cross_product < -10:
+                confidence_score += 1
+            else:
+                confidence_score -= 1
+    else:
+        confidence_score -= 3
+
     # Check 5: Hip visibility (additional verification)
-    # Hips visible = more complete body visible = likely facing camera
     left_hip_visible = left_hip_conf > conf_threshold and 0 <= left_hip_px < frame_width and 0 <= left_hip_py < frame_height
     right_hip_visible = right_hip_conf > conf_threshold and 0 <= right_hip_px < frame_width and 0 <= right_hip_py < frame_height
-    
     if left_hip_visible and right_hip_visible:
         confidence_score += 1
-    
+
     # Check 6: Shoulder width in image space
-    # From above, shoulders appear wider when person faces camera
     shoulder_width_px = math.hypot(right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
-    if shoulder_width_px > 100:  # Adjust based on your typical distances
+    if shoulder_width_px > 100:
         confidence_score += 1
     elif shoulder_width_px < 50:
         confidence_score -= 1
-    
+
     is_facing_camera = confidence_score > 0
 
     # --- Project 2D Shoulder Vector to 3D Floor Plane ---
     shoulder_vec_px = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
     cos_tilt = math.cos(CAMERA_TILT_RADIANS)
-    if cos_tilt == 0: return prev_vec or (0, 1), prev_vec or (0, 1)
+    if cos_tilt == 0:
+        return prev_vec or (0, 1), prev_vec or (0, 1)
 
     shoulder_vec_3d_x = shoulder_vec_px[0]
     shoulder_vec_3d_z = shoulder_vec_px[1] / cos_tilt
@@ -260,10 +251,8 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
 
     # Choose the vector that aligns with our front/back detection
     if is_facing_camera:
-        # Pick the vector that points towards the camera (negative dy)
         dx, dy = (dx1, dy1) if dy1 < 0 else (dx2, dy2)
     else:
-        # Pick the vector that points away from the camera (positive dy)
         dx, dy = (dx1, dy1) if dy1 > 0 else (dx2, dy2)
 
     # --- Apply camera yaw ---
@@ -274,7 +263,6 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     norm = math.hypot(raw_dx, raw_dy)
     if norm == 0:
         return prev_vec or (0, 1), prev_vec or (0, 1)
-    
     raw_vec = (raw_dx / norm, raw_dy / norm)
 
     # --- Temporal Smoothing with Strong Flip Resistance ---
@@ -282,30 +270,25 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
         stable_vec = raw_vec
     else:
         dot_product = raw_vec[0] * prev_vec[0] + raw_vec[1] * prev_vec[1]
-        
-        # Only allow 180° flip with very strong evidence
-        if dot_product < -0.3:  # Vectors pointing in significantly different directions
+        if dot_product < -0.3:
             if abs(confidence_score) >= 4:
-                # Very high confidence - allow flip with conservative smoothing
                 actual_smoothing = smoothing_factor * 0.3
             elif abs(confidence_score) >= 2:
-                # Medium confidence - very slow transition
                 actual_smoothing = smoothing_factor * 0.1
             else:
-                # Low confidence - resist change strongly
                 actual_smoothing = smoothing_factor * 0.05
-            
             stable_dx = prev_vec[0] * (1 - actual_smoothing) + raw_vec[0] * actual_smoothing
             stable_dy = prev_vec[1] * (1 - actual_smoothing) + raw_vec[1] * actual_smoothing
             stable_norm = math.hypot(stable_dx, stable_dy)
-            if stable_norm == 0: return prev_vec, prev_vec
+            if stable_norm == 0:
+                return prev_vec, prev_vec
             stable_vec = (stable_dx / stable_norm, stable_dy / stable_norm)
         else:
-            # Normal smoothing when vectors are reasonably aligned
             stable_dx = prev_vec[0] * (1 - smoothing_factor) + raw_vec[0] * smoothing_factor
             stable_dy = prev_vec[1] * (1 - smoothing_factor) + raw_vec[1] * smoothing_factor
             stable_norm = math.hypot(stable_dx, stable_dy)
-            if stable_norm == 0: return prev_vec, prev_vec
+            if stable_norm == 0:
+                return prev_vec, prev_vec
             stable_vec = (stable_dx / stable_norm, stable_dy / stable_norm)
 
     return raw_vec, stable_vec
@@ -731,7 +714,7 @@ def compute_equal_segments(wall_curve, num_segments):
         target_dist += segment_length
     return segment_points
 
-# --- Sample and average wall curve BEFORE tracking loop ---
+"""# --- Sample and average wall curve BEFORE tracking loop ---
 frames = pipeline.wait_for_frames()
 aligned_frames = align.process(frames)
 depth_frame = aligned_frames.get_depth_frame()
@@ -743,7 +726,7 @@ dense_wall_curve, dense_wall_pixels = sample_wall_vertical_lines(
 )
 
 # --- Divide the wall into equal-length segments ---
-WALL_SEGMENTS = compute_equal_segments(dense_wall_curve, NUM_SEGMENTS)
+WALL_SEGMENTS = compute_equal_segments(dense_wall_curve, NUM_SEGMENTS)"""
 
 
 
@@ -776,7 +759,7 @@ def assign_points_to_segments(dense_curve, segments):
         mapping.append(min_idx)
     return mapping
 
-DENSE_POINT_TO_SEGMENT = assign_points_to_segments(dense_wall_curve, WALL_SEGMENTS)
+
 
 # --- Helper: Find nearest dense measurement point ---
 def nearest_dense_point_idx(px, py, dense_curve):
@@ -862,24 +845,38 @@ def get_vertical_line_world_points(depth_frame, depth_intrinsics, x, y_start, y_
     return points
 
 # --- Sample and average wall curve BEFORE tracking loop ---
-frames = pipeline.wait_for_frames()
-aligned_frames = align.process(frames)
-depth_frame = aligned_frames.get_depth_frame()
-depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
 
+if args.replay_path:
+    # In replay mode, require wall_calibration.npz
+    if os.path.exists("wall_calibration.npz"):
+        data = np.load("wall_calibration.npz")
+        WALL_SEGMENTS = data["world"]
+        WALL_SEGMENT_PIXELS = data["pixels"].tolist()
+        NUM_SEGMENTS = len(WALL_SEGMENTS)
+        print(f"[INFO] Replay mode: Loaded {NUM_SEGMENTS} wall calibration points")
+    else:
+        print("[ERROR] Replay mode requires wall_calibration.npz file!")
+        exit(1)
 
-if os.path.exists("wall_calibration.npz"):
-    data = np.load("wall_calibration.npz")
-    WALL_SEGMENTS = data["world"]
-    WALL_SEGMENT_PIXELS = data["pixels"].tolist()
-    NUM_SEGMENTS = len(WALL_SEGMENTS)  # Override segment count
-    print(f"[INFO] Loaded {NUM_SEGMENTS} wall calibration points from wall_calibration.npz")
 else:
-    # Fallback: sample and average wall curve as before
-    WALL_SEGMENTS, WALL_SEGMENT_PIXELS = average_wall_curve(
-        pipeline, align, NUM_SEGMENTS, sample_duration=5.0, sampling_height=args.sampling_height
-    )
-    WALL_SEGMENTS = extend_wall_curve(WALL_SEGMENTS, EXTRA_WALL)
+    # Normal mode: sample wall from camera
+    frames = pipeline.wait_for_frames()
+    aligned_frames = align.process(frames)
+    depth_frame = aligned_frames.get_depth_frame()
+    depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
+
+    if os.path.exists("wall_calibration.npz"):
+        data = np.load("wall_calibration.npz")
+        WALL_SEGMENTS = data["world"]
+        WALL_SEGMENT_PIXELS = data["pixels"].tolist()
+        NUM_SEGMENTS = len(WALL_SEGMENTS)
+        print(f"[INFO] Loaded {NUM_SEGMENTS} wall calibration points from wall_calibration.npz")
+    else:
+        # Fallback: sample and average wall curve
+        WALL_SEGMENTS, WALL_SEGMENT_PIXELS = average_wall_curve(
+            pipeline, align, NUM_SEGMENTS, sample_duration=5.0, sampling_height=args.sampling_height
+        )
+        WALL_SEGMENTS = extend_wall_curve(WALL_SEGMENTS, EXTRA_WALL)
 
 
 if args.osc_log:
@@ -1002,33 +999,33 @@ try:
         # --- Annotation and Visualization ---
         # This part runs only if the window is supposed to be shown
         if show_window:
-            annotated_frame = results[0].plot()
-            # --- Draw vertical sampling lines and reference verticals ---
-            keypoints_data = pose_results[0].keypoints.data.cpu().numpy()
-                
+            if args.orientation_tracking and pose_results is not None:
+                annotated_frame = results[0].plot()
+                # --- Draw vertical sampling lines and reference verticals ---
+                keypoints_data = pose_results[0].keypoints.data.cpu().numpy()
                 # Iterate over each detected person's pose
-            for person_keypoints in keypoints_data:
-                    # Iterate over each keypoint for the person
-                for x, y, conf in person_keypoints:
-                    if conf > 0.5: # Draw only if confidence is above a threshold
-                        cv2.circle(annotated_frame, (int(x), int(y)), 3, (255, 0, 255), -1) # Draw a small magenta circle
-            for idx, (px, py) in enumerate(WALL_SEGMENT_PIXELS):
-                if px is not None and py is not None:
-                    # Draw a vertical line at each sampled column
-                    cv2.line(annotated_frame, (px, 0), (px, annotated_frame.shape[0]), (0, 180, 255), 1)
-                    # Draw the sampled point as before
-                    cv2.circle(annotated_frame, (px, py), 6, (255, 0, 0), 2)
-                    # Highlight active segments
-                    if idx in still_segments:
-                        cv2.circle(annotated_frame, (px, py), 14, (0, 255, 0), -1)
-                        cv2.circle(annotated_frame, (px, py), 18, (0, 255, 255), 2)
-                    else:
-                        cv2.circle(annotated_frame, (px, py), 8, (0, 0, 255), 2)
-                    # --- Draw all points above the wall segment pixel ---
-                    vertical_depths = get_vertical_line_depths(depth_frame, px, py)
-                    for y, depth in vertical_depths:
-                        if 0 < depth < 10:
-                            cv2.circle(annotated_frame, (px, y), 2, (0, 255, 255), -1)  # Yellow dots for reference line
+                for person_keypoints in keypoints_data:
+                        # Iterate over each keypoint for the person
+                    for x, y, conf in person_keypoints:
+                        if conf > 0.5: # Draw only if confidence is above a threshold
+                            cv2.circle(annotated_frame, (int(x), int(y)), 3, (255, 0, 255), -1) # Draw a small magenta circle
+                for idx, (px, py) in enumerate(WALL_SEGMENT_PIXELS):
+                    if px is not None and py is not None:
+                        # Draw a vertical line at each sampled column
+                        cv2.line(annotated_frame, (px, 0), (px, annotated_frame.shape[0]), (0, 180, 255), 1)
+                        # Draw the sampled point as before
+                        cv2.circle(annotated_frame, (px, py), 6, (255, 0, 0), 2)
+                        # Highlight active segments
+                        if idx in still_segments:
+                            cv2.circle(annotated_frame, (px, py), 14, (0, 255, 0), -1)
+                            cv2.circle(annotated_frame, (px, py), 18, (0, 255, 255), 2)
+                        else:
+                            cv2.circle(annotated_frame, (px, py), 8, (0, 0, 255), 2)
+                        # --- Draw all points above the wall segment pixel ---
+                        vertical_depths = get_vertical_line_depths(depth_frame, px, py)
+                        for y, depth in vertical_depths:
+                            if 0 < depth < 10:
+                                cv2.circle(annotated_frame, (px, y), 2, (0, 255, 255), -1)  # Yellow dots for reference line
 
         # Get a set of all IDs present in the current frame
         current_frame_ids = set()
@@ -1156,7 +1153,7 @@ try:
                             still_segments.add(person_states[track_id]['segment'])
                             still_cells.add(current_cell)
                         # Draw info on the frame only if window is visible
-                        if show_window:
+                        if show_window and args.orientation_tracking and pose_results is not None:
                             current_segment = person_states[track_id].get('segment')
                             if current_segment is not None:
                                 viz_color = (0, 255, 0) if is_still else (0, 255, 255)
@@ -1225,9 +1222,8 @@ try:
             if osc_log_file:
                 osc_log_file.write(f"{frame_counter}," + ",".join(str(x) for x in osc_list) + "\n")
             last_osc_send_time = current_time
-
+        stopped_grid_image = draw_grid_visualization(still_cells)
         if args.orientation_tracking and pose_results is not None and show_window:
-            stopped_grid_image = draw_grid_visualization(still_cells)
             pose_keypoints = pose_results[0].keypoints.xy.cpu().numpy()  
             pose_keypoints_data = pose_results[0].keypoints.data.cpu().numpy()
             if results[0].boxes.id is not None:
@@ -1299,7 +1295,9 @@ try:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
             cv2.namedWindow("Wall Segments", cv2.WINDOW_NORMAL)
             cv2.namedWindow("Movement Grid", cv2.WINDOW_NORMAL)
-            cv2.imshow(window_name, annotated_frame)
+            if args.orientation_tracking and pose_results is not None:
+                cv2.namedWindow("Pose Estimation", cv2.WINDOW_NORMAL)
+                cv2.imshow(window_name, annotated_frame)
             wall_image = draw_wall_visualization(still_segments)
             cv2.imshow("Wall Segments", wall_image)
             cv2.imshow("Movement Grid", stopped_grid_image)
@@ -1319,7 +1317,8 @@ try:
 
 
 finally:
-    pipeline.stop()
+    if not args.replay_path:
+        pipeline.stop()
     cv2.destroyAllWindows()
     if osc_log_file:
         osc_log_file.close()
