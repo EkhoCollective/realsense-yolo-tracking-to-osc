@@ -902,9 +902,6 @@ try:
         # Get depth intrinsics (use the one from depth_frame for both modes)
         depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics if not args.replay_path else depth_frame.intrinsics
 
-        # Convert the color frame to a numpy array (OpenCV format)
-        color_image = np.asanyarray(color_frame.get_data())
-
         imgsz = ((W + 31) // 32) * 32  # Ensure width is a multiple of 32
         # Run YOLO tracking on the frame
         results = model.track(
