@@ -38,6 +38,7 @@ parser.add_argument("--orientation-tracking", action="store_true", help="Enable 
 parser.add_argument("--cone-angle", type=float, default=75, help="Cone angle in degrees for orientation-based wall segment assignment")
 parser.add_argument("--occlusion-forgiveness", type=float, default=3.0, help="Seconds to retain an occluded person's state before removal.")
 parser.add_argument("--top-n-segments", type=int, default=3, help="Number of closest segments to consider before applying orientation filter")
+parser.add_argument("--reverse-osc", action="store_true", help="Reverse OSC signal (0 becomes 1, 1 becomes 0)")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -1150,6 +1151,11 @@ try:
 
 
             osc_list = [1 if idx in still_segments else 0 for idx in range(WALL_IDX_OFFSET, NUM_SEGMENTS)]
+            
+            # Apply reversal if requested
+            if args.reverse_osc:
+                osc_list = [1 - x for x in osc_list]
+            
             print(f"[INFO] Sending OSC message: {osc_list}")
             osc_client.send_message(OSC_ADDRESS, osc_list)
             if osc_log_file:
