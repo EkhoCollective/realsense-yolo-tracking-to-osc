@@ -134,11 +134,13 @@ else:
 
 def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4, conf_threshold=0.5):
     """
-    Estimate facing direction using robust 2D image-space heuristics.
-    Avoids depth-based validation due to measurement errors.
+    Estimate facing direction optimized for downward-tilted camera viewing standing people.
+    Uses shoulder asymmetry and body part visibility patterns.
     """
     # Keypoint indices
     NOSE, L_EYE, R_EYE, L_EAR, R_EAR, L_SHOULDER, R_SHOULDER = 0, 1, 2, 3, 4, 5, 6
+    L_ELBOW, R_ELBOW, L_WRIST, R_WRIST = 7, 8, 9, 10
+    L_HIP, R_HIP = 11, 12
 
     # Get frame dimensions for boundary checks
     frame_width = depth_intrinsics.width
@@ -153,6 +155,8 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     right_eye_px, right_eye_py, right_eye_conf = kps[R_EYE]
     left_ear_px, left_ear_py, left_ear_conf = kps[L_EAR]
     right_ear_px, right_ear_py, right_ear_conf = kps[R_EAR]
+    left_hip_px, left_hip_py, left_hip_conf = kps[L_HIP]
+    right_hip_px, right_hip_py, right_hip_conf = kps[R_HIP]
 
     # --- Confidence Check for core keypoints ---
     if left_shoulder_conf < conf_threshold or right_shoulder_conf < conf_threshold:
@@ -163,58 +167,77 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
             0 <= right_shoulder_px < frame_width and 0 <= right_shoulder_py < frame_height):
         return prev_vec or (0, 1), prev_vec or (0, 1)
 
-    # --- Multi-Point Front/Back Detection (2D only) ---
+    # --- Multi-Factor Front/Back Detection ---
     shoulder_center_px = (left_shoulder_px + right_shoulder_px) / 2
     shoulder_center_py = (left_shoulder_py + right_shoulder_py) / 2
     
-    is_facing_camera = False
     confidence_score = 0
     
-    # Check 1: Primary - Nose position relative to shoulders (2D cross product)
-    if nose_conf > conf_threshold and 0 <= nose_px < frame_width and 0 <= nose_py < frame_height:
-        shoulder_vec_2d = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
-        nose_vec_2d = (nose_px - shoulder_center_px, nose_py - shoulder_center_py)
-        cross_product = shoulder_vec_2d[0] * nose_vec_2d[1] - shoulder_vec_2d[1] * nose_vec_2d[0]
-        
-        # For downward-tilted camera, negative cross = facing camera
-        if cross_product < 0:
-            confidence_score += 3  # Strong indicator
-        else:
-            confidence_score -= 3
+    # Check 1: Shoulder asymmetry (most reliable for standing people from above)
+    # When facing camera, shoulders appear more symmetrical in Y-axis
+    # When facing away, one shoulder often appears higher due to perspective
+    shoulder_y_diff = abs(left_shoulder_py - right_shoulder_py)
+    if shoulder_y_diff < 5:  # Very symmetrical = likely facing camera
+        confidence_score += 2
+    elif shoulder_y_diff > 15:  # Asymmetrical = likely angled or facing away
+        confidence_score -= 1
     
-    # Check 2: Eye visibility pattern
+    # Check 2: Eye visibility pattern (strong indicator)
     left_eye_visible = left_eye_conf > conf_threshold and 0 <= left_eye_px < frame_width and 0 <= left_eye_py < frame_height
     right_eye_visible = right_eye_conf > conf_threshold and 0 <= right_eye_px < frame_width and 0 <= right_eye_py < frame_height
     
     if left_eye_visible and right_eye_visible:
-        # Both eyes visible = likely facing camera
-        confidence_score += 2
+        # Both eyes visible = facing camera
+        confidence_score += 3
     elif not left_eye_visible and not right_eye_visible:
-        # No eyes visible = likely facing away
-        confidence_score -= 2
+        # No eyes visible = facing away
+        confidence_score -= 3
+    elif left_eye_visible != right_eye_visible:
+        # Only one eye = profile/angled, but still helps determine direction
+        confidence_score += 1  # Slight bias toward facing camera
     
-    # Check 3: Ear visibility (ears visible when facing away or sideways)
+    # Check 3: Ear visibility (ears more visible when facing away)
     left_ear_visible = left_ear_conf > conf_threshold and 0 <= left_ear_px < frame_width and 0 <= left_ear_py < frame_height
     right_ear_visible = right_ear_conf > conf_threshold and 0 <= right_ear_px < frame_width and 0 <= right_ear_py < frame_height
     
-    if left_ear_visible or right_ear_visible:
-        # Ear visible = more likely facing away or sideways
+    ear_count = sum([left_ear_visible, right_ear_visible])
+    if ear_count >= 2:
+        # Both ears visible = likely facing away or strongly angled
+        confidence_score -= 3
+    elif ear_count == 1:
+        # One ear visible = angled, slight bias toward away
         confidence_score -= 1
     
-    # Check 4: Nose Y-position relative to shoulders
-    # When facing camera from above, nose should be above shoulder line
+    # Check 4: Nose position relative to shoulder center (secondary check)
+    # For downward camera, this is less reliable but can help
     if nose_conf > conf_threshold and 0 <= nose_px < frame_width and 0 <= nose_py < frame_height:
-        if nose_py < shoulder_center_py - 10:  # Nose is above shoulders (accounting for pixel tolerance)
+        # Calculate if nose is "in front of" or "behind" shoulder line
+        shoulder_vec_2d = (right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
+        nose_vec_2d = (nose_px - shoulder_center_px, nose_py - shoulder_center_py)
+        cross_product = shoulder_vec_2d[0] * nose_vec_2d[1] - shoulder_vec_2d[1] * nose_vec_2d[0]
+        
+        # For downward camera, negative cross = nose appears "above" shoulder line
+        # This is a weak indicator, so only ±1 point
+        if cross_product < -10:  # Add threshold to avoid noise
             confidence_score += 1
-        elif nose_py > shoulder_center_py + 10:  # Nose is below shoulders
+        elif cross_product > 10:
             confidence_score -= 1
     
-    # Check 5: Shoulder width (appears wider when facing camera)
-    shoulder_width_px = math.hypot(right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
-    # This is a heuristic: wider shoulders in image = more frontal
-    # We can compare to a running average, but for simplicity, use absolute threshold
-    if shoulder_width_px > 80:  # Adjust based on your camera distance
+    # Check 5: Hip visibility (additional verification)
+    # Hips visible = more complete body visible = likely facing camera
+    left_hip_visible = left_hip_conf > conf_threshold and 0 <= left_hip_px < frame_width and 0 <= left_hip_py < frame_height
+    right_hip_visible = right_hip_conf > conf_threshold and 0 <= right_hip_px < frame_width and 0 <= right_hip_py < frame_height
+    
+    if left_hip_visible and right_hip_visible:
         confidence_score += 1
+    
+    # Check 6: Shoulder width in image space
+    # From above, shoulders appear wider when person faces camera
+    shoulder_width_px = math.hypot(right_shoulder_px - left_shoulder_px, right_shoulder_py - left_shoulder_py)
+    if shoulder_width_px > 100:  # Adjust based on your typical distances
+        confidence_score += 1
+    elif shoulder_width_px < 50:
+        confidence_score -= 1
     
     is_facing_camera = confidence_score > 0
 
@@ -251,22 +274,23 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
     
     raw_vec = (raw_dx / norm, raw_dy / norm)
 
-    # --- Temporal Smoothing with Confidence-Based Flip Detection ---
+    # --- Temporal Smoothing with Strong Flip Resistance ---
     if prev_vec is None:
         stable_vec = raw_vec
     else:
         dot_product = raw_vec[0] * prev_vec[0] + raw_vec[1] * prev_vec[1]
         
-        # Only allow flip if:
-        # 1. Vectors are very different (dot < -0.5)
-        # 2. Confidence score is strong (abs > 3)
-        if dot_product < -0.5:
-            if abs(confidence_score) >= 3:
-                # High confidence flip - allow it but smooth conservatively
-                actual_smoothing = smoothing_factor * 0.5
-            else:
-                # Low confidence flip - resist change strongly
+        # Only allow 180° flip with very strong evidence
+        if dot_product < -0.3:  # Vectors pointing in significantly different directions
+            if abs(confidence_score) >= 4:
+                # Very high confidence - allow flip with conservative smoothing
+                actual_smoothing = smoothing_factor * 0.3
+            elif abs(confidence_score) >= 2:
+                # Medium confidence - very slow transition
                 actual_smoothing = smoothing_factor * 0.1
+            else:
+                # Low confidence - resist change strongly
+                actual_smoothing = smoothing_factor * 0.05
             
             stable_dx = prev_vec[0] * (1 - actual_smoothing) + raw_vec[0] * actual_smoothing
             stable_dy = prev_vec[1] * (1 - actual_smoothing) + raw_vec[1] * actual_smoothing
@@ -274,7 +298,7 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
             if stable_norm == 0: return prev_vec, prev_vec
             stable_vec = (stable_dx / stable_norm, stable_dy / stable_norm)
         else:
-            # Normal smoothing when vectors are aligned
+            # Normal smoothing when vectors are reasonably aligned
             stable_dx = prev_vec[0] * (1 - smoothing_factor) + raw_vec[0] * smoothing_factor
             stable_dy = prev_vec[1] * (1 - smoothing_factor) + raw_vec[1] * smoothing_factor
             stable_norm = math.hypot(stable_dx, stable_dy)
