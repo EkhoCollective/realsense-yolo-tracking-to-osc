@@ -127,16 +127,16 @@ else:
 # Load the ultra-efficient YOLOv8-L model
 if torch.cuda.is_available():
     print("[INFO] Loading models onto GPU...")
-    model = YOLO('yolov8l.pt').cuda()
+    model = YOLO('yolo11l.pt').cuda()
     pose_model = None
     if args.orientation_tracking:
-        pose_model = YOLO('yolov8l-pose.pt').cuda()
+        pose_model = YOLO('yolo11l-pose.pt').cuda()
 else:
     print("[INFO] Loading models onto CPU...")
-    model = YOLO('yolov8l.pt')
+    model = YOLO('yolo11l.pt')
     pose_model = None
     if args.orientation_tracking:
-        pose_model = YOLO('yolov8l-pose.pt')
+        pose_model = YOLO('yolo11l-pose.pt')
 
 def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, prev_vec=None, smoothing_factor=0.4, conf_threshold=0.5):
     """
