@@ -41,6 +41,9 @@ parser.add_argument("--top-n-segments", type=int, default=3, help="Number of clo
 parser.add_argument("--reverse-osc", action="store_true", help="Reverse OSC signal (0 becomes 1, 1 becomes 0)")
 parser.add_argument("--project-all", action="store_true", help="Project to all wall segments within any vision cone (ignores stillness)")
 parser.add_argument("--head-to-center-offset", type=float, default=0.0, help="Meters to add to depth to approximate center of mass from head position")
+parser.add_argument("--min-distance", type=float, default=0.0, help="Minimum distance (in meters) from wall segment to assign a person")
+parser.add_argument("--max-distance", type=float, default=float('inf'), help="Maximum distance (in meters) from wall segment to assign a person")
+
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -298,9 +301,10 @@ def get_facing_direction(keypoints_with_conf, depth_frame, depth_intrinsics, pre
 
 
 
+
 def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle, top_n=None):
     """
-    Returns the index of the nearest wall segment within the person's cone of vision.
+    Returns the index of the nearest wall segment within the person's cone of vision and distance limits.
     If top_n is specified, first filters to the top N closest segments by distance.
     person_pos: (x, y) in world coordinates
     facing_vec: (dx, dy) unit vector
@@ -310,14 +314,32 @@ def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.c
     """
     cone_angle_rad = math.radians(cone_angle_deg / 2)
     
-    # First, calculate distances to all segments
+    # First, find the closest segment regardless of filters
+    closest_dist = float('inf')
+    closest_idx = None
+    for idx, (wx, wy) in enumerate(wall_segments):
+        if wx is None or wy is None:
+            continue
+        vec_to_wall = (wx - person_pos[0], wy - person_pos[1])
+        dist = math.hypot(*vec_to_wall)
+        if dist < closest_dist:
+            closest_dist = dist
+            closest_idx = idx
+    
+    # If the closest segment is too close, exclude the person entirely
+    if closest_idx is not None and closest_dist < args.min_distance:
+        return None
+    
+    # Now apply normal filtering logic
     segment_distances = []
     for idx, (wx, wy) in enumerate(wall_segments):
         if wx is None or wy is None:
             continue
         vec_to_wall = (wx - person_pos[0], wy - person_pos[1])
         dist = math.hypot(*vec_to_wall)
-        segment_distances.append((idx, dist))
+        # Apply distance filters
+        if args.min_distance <= dist <= args.max_distance:
+            segment_distances.append((idx, dist))
     
     # If top_n is specified, filter to top N closest segments
     if top_n is not None and top_n > 0:
@@ -344,9 +366,11 @@ def is_wall_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.c
     
     return best_idx
 
+
+
 def get_all_walls_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=args.cone_angle, top_n=None):
     """
-    Returns a list of all wall segment indices within the person's cone of vision.
+    Returns a list of all wall segment indices within the person's cone of vision and distance limits.
     If top_n is specified, first filters to the top N closest segments by distance.
     person_pos: (x, y) in world coordinates
     facing_vec: (dx, dy) unit vector
@@ -356,14 +380,32 @@ def get_all_walls_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=
     """
     cone_angle_rad = math.radians(cone_angle_deg / 2)
     
-    # First, calculate distances to all segments
+    # First, find the closest segment regardless of filters
+    closest_dist = float('inf')
+    closest_idx = None
+    for idx, (wx, wy) in enumerate(wall_segments):
+        if wx is None or wy is None:
+            continue
+        vec_to_wall = (wx - person_pos[0], wy - person_pos[1])
+        dist = math.hypot(*vec_to_wall)
+        if dist < closest_dist:
+            closest_dist = dist
+            closest_idx = idx
+    
+    # If the closest segment is too close, exclude the person entirely
+    if closest_idx is not None and closest_dist < args.min_distance:
+        return []
+    
+    # Now apply normal filtering logic
     segment_distances = []
     for idx, (wx, wy) in enumerate(wall_segments):
         if wx is None or wy is None:
             continue
         vec_to_wall = (wx - person_pos[0], wy - person_pos[1])
         dist = math.hypot(*vec_to_wall)
-        segment_distances.append((idx, dist))
+        # Apply distance filters
+        if args.min_distance <= dist <= args.max_distance:
+            segment_distances.append((idx, dist))
     
     # If top_n is specified, filter to top N closest segments
     if top_n is not None and top_n > 0:
@@ -387,6 +429,7 @@ def get_all_walls_in_cone(person_pos, facing_vec, wall_segments, cone_angle_deg=
             segments_in_cone.append(idx)
     
     return segments_in_cone
+
 
 # --- Helper function for Grid Visualization ---
 def draw_grid_visualization(occupied_cells):
@@ -603,9 +646,9 @@ def sample_wall_vertical_lines(depth_frame, depth_intrinsics, num_lines=20, min_
     return wall_curve, wall_pixels
 
 def closest_wall_segment(px, py):
-    """Returns the index of the closest valid wall segment to (px, py)."""
+    """Returns the index of the closest valid wall segment to (px, py) within distance limits."""
     min_dist = float('inf')
-    min_idx = 0
+    min_idx = None
     for idx, (wx, wy) in enumerate(WALL_SEGMENTS):
         if wx is None or wy is None:
             continue  # Skip invalid wall points
@@ -613,7 +656,12 @@ def closest_wall_segment(px, py):
         if dist < min_dist:
             min_dist = dist
             min_idx = idx
-    return min_idx
+    
+    # Check if the closest segment is within our distance requirements
+    if min_idx is not None and args.min_distance <= min_dist <= args.max_distance:
+        return min_idx
+    else:
+        return None  # Person is too close, too far, or no valid segments found
 
 def draw_wall_visualization(occupied_segments):
     """Draws rectangles for wall segments, all with equal pixel width."""
@@ -1105,7 +1153,7 @@ try:
                                         if track_id in person_states:
                                             person_states[track_id]['facing_vec'] = stable_vec
                                         segment_idx = is_wall_in_cone(person_pos, stable_vec, WALL_SEGMENTS, top_n=args.top_n_segments)
-                                        # If cone finds nothing, fall back to closest
+                                        # If cone finds nothing, fall back to closest (with distance limits)
                                         if segment_idx is None:
                                             segment_idx = closest_wall_segment(person_pos[0], person_pos[1])
                                         return segment_idx
@@ -1123,19 +1171,23 @@ try:
                             person_pos = current_world_pos
                             closest_segment_idx = get_current_segment_idx(track_id, person_pos)
 
-                            person_states[track_id] = {
-                                'origin_position': current_world_pos,  # Store actual world position instead of grid cell
-                                'current_position': current_world_pos,
-                                'still_since': current_time_for_state,
-                                'osc_sent': False,
-                                'segment': closest_segment_idx,
-                                'facing_vec': None,
-                                'last_seen': current_time_for_state,
-                                'position_samples': [current_world_pos],
-                                'position_sample_times': [current_time_for_state]
-                            }
+                            # Only create person state if they have a valid segment assignment
+                            if closest_segment_idx is not None:
+                                person_states[track_id] = {
+                                    'origin_position': current_world_pos,  # Store actual world position instead of grid cell
+                                    'current_position': current_world_pos,
+                                    'still_since': current_time_for_state,
+                                    'osc_sent': False,
+                                    'segment': closest_segment_idx,
+                                    'facing_vec': None,
+                                    'last_seen': current_time_for_state,
+                                    'position_samples': [current_world_pos],
+                                    'position_sample_times': [current_time_for_state]
+                                }
+                            else:
+                                print(f"[INFO] Person ID {track_id} is outside distance limits ({args.min_distance}m - {args.max_distance}m), not tracking.")
                         else:
-                            # Existing person, check if they moved beyond tolerance using absolute distance
+                            # Existing person, check movement
                             origin_pos = person_states[track_id]['origin_position']
                             distance_moved = math.hypot(
                                 current_world_pos[0] - origin_pos[0], 
@@ -1146,13 +1198,22 @@ try:
                                 # Person moved outside tolerance, reset and re-evaluate segment
                                 person_pos = current_world_pos
                                 closest_segment_idx = get_current_segment_idx(track_id, person_pos)
-                                person_states[track_id]['segment'] = closest_segment_idx
-                                person_states[track_id]['origin_position'] = current_world_pos
-                                person_states[track_id]['still_since'] = current_time_for_state
-                                person_states[track_id]['osc_sent'] = False
-                                # Reset position samples when person moves
-                                person_states[track_id]['position_samples'] = [current_world_pos]
-                                person_states[track_id]['position_sample_times'] = [current_time_for_state]
+                                
+                                # Only update if person has a valid segment assignment
+                                if closest_segment_idx is not None:
+                                    person_states[track_id]['segment'] = closest_segment_idx
+                                    person_states[track_id]['origin_position'] = current_world_pos
+                                    person_states[track_id]['still_since'] = current_time_for_state
+                                    person_states[track_id]['osc_sent'] = False
+                                    # Reset position samples when person moves
+                                    person_states[track_id]['position_samples'] = [current_world_pos]
+                                    person_states[track_id]['position_sample_times'] = [current_time_for_state]
+                                else:
+                                    print(f"[INFO] Person ID {track_id} moved outside distance limits, removing from tracking.")
+                                    # Remove person from tracking
+                                    if track_id in person_states:
+                                        del person_states[track_id]
+                                    continue
                             else:
                                 # Person has not moved, add position sample
                                 person_states[track_id]['position_samples'].append(current_world_pos)
@@ -1166,59 +1227,81 @@ try:
 
                                 # Update facing vector if available
                                 if args.orientation_tracking:
-                                     get_current_segment_idx(track_id, current_world_pos)
+                                    get_current_segment_idx(track_id, current_world_pos)
 
-                                # Remove sticky cell logic since we're using distance-based tracking
-
-                        person_states[track_id]['current_position'] = current_world_pos
-                        person_states[track_id]['last_seen'] = current_time_for_state
-                        
-                        # --- Visualization & Stillness Logic ---
-                        is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
-                        if is_still:
-                            # Calculate averaged position for stable segment assignment
-                            position_samples = person_states[track_id]['position_samples']
-                            if position_samples:
-                                avg_x = sum(pos[0] for pos in position_samples) / len(position_samples)
-                                avg_y = sum(pos[1] for pos in position_samples) / len(position_samples)
-                                averaged_position = (avg_x, avg_y)
-                                
-                                # Re-calculate segment based on averaged position
-                                if args.orientation_tracking and person_states[track_id].get('facing_vec'):
-                                    facing_vec = person_states[track_id]['facing_vec']
-                                    segment_idx = is_wall_in_cone(averaged_position, facing_vec, WALL_SEGMENTS, top_n=args.top_n_segments)
-                                    if segment_idx is None:
-                                        segment_idx = closest_wall_segment(averaged_position[0], averaged_position[1])
-                                else:
-                                    segment_idx = closest_wall_segment(averaged_position[0], averaged_position[1])
-                                
-                                # Update the segment based on averaged position
-                                person_states[track_id]['segment'] = segment_idx
-                                person_states[track_id]['averaged_position'] = averaged_position
+                        # Only update person state if they're still being tracked
+                        if track_id in person_states:
+                            person_states[track_id]['current_position'] = current_world_pos
+                            person_states[track_id]['last_seen'] = current_time_for_state
                             
-                            still_segments.add(person_states[track_id]['segment'])
-                            still_cells.add((grid_x, grid_y))  # Keep for visualization only
-                        
-                        # Draw info on the frame for all modes when window is visible
-                        if show_window:
-                            current_segment = person_states[track_id].get('segment')
-                            if current_segment is not None:
-                                viz_color = (0, 255, 0) if is_still else (0, 255, 255)
-                                # Show movement distance and averaged position info when still
-                                origin_pos = person_states[track_id]['origin_position']
-                                movement_dist = math.hypot(
-                                    current_world_pos[0] - origin_pos[0], 
-                                    current_world_pos[1] - origin_pos[1]
-                                )
-                                if is_still and 'averaged_position' in person_states[track_id]:
-                                    avg_pos = person_states[track_id]['averaged_position']
-                                    num_samples = len(person_states[track_id]['position_samples'])
-                                    label = f"ID {track_id}: seg {current_segment+1} @ {adjusted_distance:.2f}m (moved: {movement_dist:.2f}m, avg: {avg_pos[0]:.2f},{avg_pos[1]:.2f}, n={num_samples})"
+                            # --- Visualization & Stillness Logic ---
+                            is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
+                            if is_still:
+                                # Calculate averaged position for stable segment assignment
+                                position_samples = person_states[track_id]['position_samples']
+                                if position_samples:
+                                    avg_x = sum(pos[0] for pos in position_samples) / len(position_samples)
+                                    avg_y = sum(pos[1] for pos in position_samples) / len(position_samples)
+                                    averaged_position = (avg_x, avg_y)
+                                    
+                                    # Re-calculate segment based on averaged position
+                                    if args.orientation_tracking and person_states[track_id].get('facing_vec'):
+                                        facing_vec = person_states[track_id]['facing_vec']
+                                        segment_idx = is_wall_in_cone(averaged_position, facing_vec, WALL_SEGMENTS, top_n=args.top_n_segments)
+                                        if segment_idx is None:
+                                            segment_idx = closest_wall_segment(averaged_position[0], averaged_position[1])
+                                    else:
+                                        segment_idx = closest_wall_segment(averaged_position[0], averaged_position[1])
+                                    
+                                    # Only update segment if it's valid (within distance limits)
+                                    if segment_idx is not None:
+                                        person_states[track_id]['segment'] = segment_idx
+                                        person_states[track_id]['averaged_position'] = averaged_position
+                                        still_segments.add(segment_idx)
+                                        still_cells.add((grid_x, grid_y))  # Keep for visualization only
+                                    else:
+                                        print(f"[INFO] Person ID {track_id} is outside distance limits when still, not activating segment.")
+                            
+                            # Draw info on the frame for all modes when window is visible
+                            if show_window:
+                                current_segment = person_states[track_id].get('segment')
+                                if current_segment is not None:
+                                    viz_color = (0, 255, 0) if is_still else (0, 255, 255)
+                                    # Show movement distance and averaged position info when still
+                                    origin_pos = person_states[track_id]['origin_position']
+                                    movement_dist = math.hypot(
+                                        current_world_pos[0] - origin_pos[0], 
+                                        current_world_pos[1] - origin_pos[1]
+                                    )
+                                    # Calculate distance to assigned segment
+                                    seg_x, seg_y = WALL_SEGMENTS[current_segment]
+                                    seg_dist = math.hypot(current_world_pos[0] - seg_x, current_world_pos[1] - seg_y)
+                                    
+                                    if is_still and 'averaged_position' in person_states[track_id]:
+                                        avg_pos = person_states[track_id]['averaged_position']
+                                        num_samples = len(person_states[track_id]['position_samples'])
+                                        label = f"ID {track_id}: seg {current_segment+1} @ {adjusted_distance:.2f}m (dist: {seg_dist:.2f}m, moved: {movement_dist:.2f}m, avg: {avg_pos[0]:.2f},{avg_pos[1]:.2f}, n={num_samples})"
+                                    else:
+                                        label = f"ID {track_id}: seg {current_segment+1} @ {adjusted_distance:.2f}m (dist: {seg_dist:.2f}m, moved: {movement_dist:.2f}m)"
+                                    cv2.putText(annotated_frame, label, (x1, y1 - 10),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
+                                    cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
                                 else:
-                                    label = f"ID {track_id}: seg {current_segment+1} @ {adjusted_distance:.2f}m (moved: {movement_dist:.2f}m)"
+                                    # Person has no valid segment assignment
+                                    viz_color = (128, 128, 128)  # Gray color for unassigned
+                                    label = f"ID {track_id}: NO SEGMENT (outside {args.min_distance}m-{args.max_distance}m range)"
+                                    cv2.putText(annotated_frame, label, (x1, y1 - 10),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
+                                    cv2.circle(annotated_frame, (cx, cy), 5, (128, 128, 128), -1)
+                        else:
+                            # Person was not added to tracking (outside distance limits), show gray visualization
+                            if show_window:
+                                viz_color = (128, 128, 128)  # Gray color for unassigned
+                                label = f"ID {track_id}: NOT TRACKED (outside {args.min_distance}m-{args.max_distance}m range)"
                                 cv2.putText(annotated_frame, label, (x1, y1 - 10),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
-                                cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
+                                cv2.circle(annotated_frame, (cx, cy), 5, (128, 128, 128), -1)
+
 
         # --- Timed OSC Sending & Visualization ---
         current_time = time.time()
