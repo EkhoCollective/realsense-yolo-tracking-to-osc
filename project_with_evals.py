@@ -716,22 +716,66 @@ def closest_wall_segment(px, py):
     # Check if the closest segment is within our distance requirements
     if min_idx is not None:
         if min_idx in DECOUPLED_SEGMENTS:
-            # For decoupled segments, check if within any of their zones
+            # For decoupled segments, check if within any of their zones with furthest zone logic
+            people_in_other_segments = are_people_in_any_other_segments()
             zones = DECOUPLED_ZONES.get(min_idx, [(args.decouple_min_distance, args.decouple_max_distance)])
-            in_any_zone = any(min_distance <= min_dist <= max_distance for min_distance, max_distance in zones)
-            if in_any_zone:
-                return min_idx
+            sorted_zones = sorted(zones, key=lambda z: z[0])
+            
+            for zone_idx, (min_distance, max_distance) in enumerate(sorted_zones):
+                if min_distance <= min_dist <= max_distance:
+                    is_furthest_zone = zone_idx == (len(sorted_zones) - 1)
+                    is_last_segment = min_idx == (NUM_SEGMENTS - 1)
+                    
+                    if is_last_segment or not is_furthest_zone or not people_in_other_segments:
+                        return min_idx
+                    break
         else:
+            # Regular segments use simple distance limits
             min_distance = args.min_distance
             max_distance = args.max_distance
             if min_distance <= min_dist <= max_distance:
                 return min_idx
     
-    return None  # Person is too close, too far, or no valid segments found
+    return None  # Person is too close, too far, or furthest zone is disabled
 
+def are_people_in_any_other_segments():
+    """Check if there are people within range of any segment except the last one."""
+    for tid, state in person_states.items():
+        if 'current_position' in state:
+            person_pos = state['current_position']
+            
+            # Check all segments except the last one
+            for idx in range(NUM_SEGMENTS - 1):  # Exclude last segment
+                wx, wy = WALL_SEGMENTS[idx]
+                if wx is not None and wy is not None:
+                    dist = math.hypot(person_pos[0] - wx, person_pos[1] - wy)
+                    
+                    # Check if person is within range of this segment
+                    if idx in DECOUPLED_SEGMENTS:
+                        # For decoupled segments, check all zones except the furthest
+                        zones = DECOUPLED_ZONES.get(idx, [(args.decouple_min_distance, args.decouple_max_distance)])
+                        sorted_zones = sorted(zones, key=lambda z: z[0])
+                        if len(sorted_zones) > 1:
+                            # Check all zones except the furthest (last) one
+                            for zone_idx, (min_dist, max_dist) in enumerate(sorted_zones[:-1]):
+                                if min_dist <= dist <= max_dist:
+                                    return True
+                        else:
+                            # Only one zone, check it normally
+                            min_dist, max_dist = sorted_zones[0]
+                            if min_dist <= dist <= max_dist:
+                                return True
+                    else:
+                        # For regular segments, use normal distance limits
+                        if args.min_distance <= dist <= args.max_distance:
+                            return True
+    
+    return False
 
 def get_all_decoupled_segments_in_range(person_pos):
-    """Returns all decoupled segments within any of their specific distance zones."""
+    """Returns all decoupled segments within any of their specific distance zones, respecting furthest zone rules."""
+    people_in_other_segments = are_people_in_any_other_segments()
+    
     active_decoupled = []
     for idx in DECOUPLED_SEGMENTS:
         if idx < len(WALL_SEGMENTS):
@@ -739,12 +783,25 @@ def get_all_decoupled_segments_in_range(person_pos):
             if wx is not None and wy is not None:
                 dist = math.hypot(person_pos[0] - wx, person_pos[1] - wy)
                 
-                # Check if person is within any of the zones for this segment
                 zones = DECOUPLED_ZONES.get(idx, [(args.decouple_min_distance, args.decouple_max_distance)])
-                for min_dist, max_dist in zones:
+                sorted_zones = sorted(zones, key=lambda z: z[0])
+                
+                # Check zones with furthest zone logic
+                for zone_idx, (min_dist, max_dist) in enumerate(sorted_zones):
                     if min_dist <= dist <= max_dist:
-                        active_decoupled.append(idx)
+                        # Check if this is the furthest zone
+                        is_furthest_zone = zone_idx == (len(sorted_zones) - 1)
+                        is_last_segment = idx == (NUM_SEGMENTS - 1)
+                        
+                        # Allow furthest zone only if:
+                        # 1. It's the last segment (always exempt), OR
+                        # 2. It's not the furthest zone, OR  
+                        # 3. It's the furthest zone AND no people are in any other segments
+                        if is_last_segment or not is_furthest_zone or not people_in_other_segments:
+                            active_decoupled.append(idx)
+                        
                         break  # Found a matching zone, no need to check others
+    
     return active_decoupled
 
 def draw_wall_visualization(occupied_segments):
