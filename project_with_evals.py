@@ -75,7 +75,7 @@ WALL_IDX_OFFSET = args.wall_idx_offset
 # --- 1. RealSense Setup ---
 if args.replay_path:
     # In replay mode, we don't need the pipeline at all
-    depth_scale = 0.001  # Standard RealSense depth scale
+    depth_scale = 0.0010000000474974513 # Standard RealSense depth scale
     print("[INFO] Replay mode: Skipping RealSense pipeline initialization")
 else:
     # Normal mode: Initialize RealSense pipeline
@@ -999,33 +999,37 @@ try:
         # --- Annotation and Visualization ---
         # This part runs only if the window is supposed to be shown
         if show_window:
+            annotated_frame = results[0].plot()
+            
+            # --- Draw vertical sampling lines for all modes ---
+            for idx, (px, py) in enumerate(WALL_SEGMENT_PIXELS):
+                if px is not None and py is not None:
+                    # Draw a vertical line at each sampled column
+                    cv2.line(annotated_frame, (px, 0), (px, annotated_frame.shape[0]), (0, 180, 255), 1)
+                    # Draw the sampled point
+                    cv2.circle(annotated_frame, (px, py), 6, (255, 0, 0), 2)
+                    # Highlight active segments
+                    if idx in still_segments:
+                        cv2.circle(annotated_frame, (px, py), 14, (0, 255, 0), -1)
+                        cv2.circle(annotated_frame, (px, py), 18, (0, 255, 255), 2)
+                    else:
+                        cv2.circle(annotated_frame, (px, py), 8, (0, 0, 255), 2)
+                    
+                    # --- Draw all points above the wall segment pixel ---
+                    vertical_depths = get_vertical_line_depths(depth_frame, px, py)
+                    for y, depth in vertical_depths:
+                        if 0 < depth < 10:
+                            cv2.circle(annotated_frame, (px, y), 2, (0, 255, 255), -1)  # Yellow dots for reference line
+
+            # --- Draw pose keypoints only when orientation tracking is enabled ---
             if args.orientation_tracking and pose_results is not None:
-                annotated_frame = results[0].plot()
-                # --- Draw vertical sampling lines and reference verticals ---
                 keypoints_data = pose_results[0].keypoints.data.cpu().numpy()
                 # Iterate over each detected person's pose
                 for person_keypoints in keypoints_data:
-                        # Iterate over each keypoint for the person
+                    # Iterate over each keypoint for the person
                     for x, y, conf in person_keypoints:
                         if conf > 0.5: # Draw only if confidence is above a threshold
                             cv2.circle(annotated_frame, (int(x), int(y)), 3, (255, 0, 255), -1) # Draw a small magenta circle
-                for idx, (px, py) in enumerate(WALL_SEGMENT_PIXELS):
-                    if px is not None and py is not None:
-                        # Draw a vertical line at each sampled column
-                        cv2.line(annotated_frame, (px, 0), (px, annotated_frame.shape[0]), (0, 180, 255), 1)
-                        # Draw the sampled point as before
-                        cv2.circle(annotated_frame, (px, py), 6, (255, 0, 0), 2)
-                        # Highlight active segments
-                        if idx in still_segments:
-                            cv2.circle(annotated_frame, (px, py), 14, (0, 255, 0), -1)
-                            cv2.circle(annotated_frame, (px, py), 18, (0, 255, 255), 2)
-                        else:
-                            cv2.circle(annotated_frame, (px, py), 8, (0, 0, 255), 2)
-                        # --- Draw all points above the wall segment pixel ---
-                        vertical_depths = get_vertical_line_depths(depth_frame, px, py)
-                        for y, depth in vertical_depths:
-                            if 0 < depth < 10:
-                                cv2.circle(annotated_frame, (px, y), 2, (0, 255, 255), -1)  # Yellow dots for reference line
 
         # Get a set of all IDs present in the current frame
         current_frame_ids = set()
@@ -1152,8 +1156,9 @@ try:
                         if is_still:
                             still_segments.add(person_states[track_id]['segment'])
                             still_cells.add(current_cell)
-                        # Draw info on the frame only if window is visible
-                        if show_window and args.orientation_tracking and pose_results is not None:
+                        
+                        # Draw info on the frame for all modes when window is visible
+                        if show_window:
                             current_segment = person_states[track_id].get('segment')
                             if current_segment is not None:
                                 viz_color = (0, 255, 0) if is_still else (0, 255, 255)
@@ -1295,9 +1300,14 @@ try:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
             cv2.namedWindow("Wall Segments", cv2.WINDOW_NORMAL)
             cv2.namedWindow("Movement Grid", cv2.WINDOW_NORMAL)
+            
+            # Always show the main annotated frame
+            cv2.imshow(window_name, annotated_frame)
+            
+            # Only show pose estimation window when orientation tracking is enabled
             if args.orientation_tracking and pose_results is not None:
                 cv2.namedWindow("Pose Estimation", cv2.WINDOW_NORMAL)
-                cv2.imshow(window_name, annotated_frame)
+            
             wall_image = draw_wall_visualization(still_segments)
             cv2.imshow("Wall Segments", wall_image)
             cv2.imshow("Movement Grid", stopped_grid_image)
