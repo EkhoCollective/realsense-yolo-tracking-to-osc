@@ -64,6 +64,8 @@ CAMERA_HEIGHT_M = args.height # 3.5 meters
 # If the camera is 1.5m to the left of the room's center, set this to 1.5.
 CAMERA_X_OFFSET_M = args.offset
 
+HEAD_TO_CENTER_OFFSET = 0.10 # Meters to add to depth to approximate center of mass from head position
+
 # --- Grid Visualization Configuration ---
 GRID_DIM_METERS = 40  # Visualize a 20m x 20m area
 GRID_PIXELS = 500     # Size of the grid visualization window
@@ -1060,9 +1062,27 @@ try:
                         current_frame_grid_cells.add((grid_x, grid_y))
 
                         # --- Update Person State for Stillness Detection ---
-                        current_cell = (grid_x, grid_y)
                         current_time_for_state = time.time()
+                        # Add 10cm offset to push person further away from camera (head vs center mass)
+                        adjusted_distance = distance_m + HEAD_TO_CENTER_OFFSET
+                        
+                        # Use different deprojection method based on mode
+                        if args.replay_path:
+                            point_3d = depth_intrinsics.deproject([cx, cy], adjusted_distance)
+                        else:
+                            point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], adjusted_distance)
+                        vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
+                        floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+                        floor_x = point_3d[0] + CAMERA_X_OFFSET_M
+                        rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
+                        rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
+                        
                         current_world_pos = (rotated_x, rotated_y)
+                        
+                        # Calculate grid position only for visualization
+                        grid_x = math.floor(rotated_x)
+                        grid_y = math.floor(rotated_y)
+                        current_frame_grid_cells.add((grid_x, grid_y))
 
                         # Helper function to get segment index to avoid code repetition
                         def get_current_segment_idx(track_id, person_pos):
@@ -1103,36 +1123,17 @@ try:
                             closest_segment_idx = get_current_segment_idx(track_id, person_pos)
 
                             person_states[track_id] = {
-                                'origin_cell': current_cell,
-                                'current_cell': current_cell,
-                                'sticky_cell': current_cell,
-                                'sticky_since': current_time_for_state,
+                                'origin_position': current_world_pos,  # Store actual world position instead of grid cell
+                                'current_position': current_world_pos,
                                 'still_since': current_time_for_state,
                                 'osc_sent': False,
                                 'segment': closest_segment_idx,
                                 'facing_vec': None,
                                 'last_seen': current_time_for_state,
-                                'position_samples': [current_world_pos],  # New: store position samples
-                                'position_sample_times': [current_time_for_state]  # New: store sample times
+                                'position_samples': [current_world_pos],
+                                'position_sample_times': [current_time_for_state]
                             }
                         else:
-                            # Existing person, check if they moved beyond tolerance
-                            origin_cell = person_states[track_id]['origin_cell']
-                            dx = abs(current_cell[0] - origin_cell[0])
-                            dy = abs(current_cell[1] - origin_cell[1])
-                            if dx > MOVEMENT_TOLERANCE or dy > MOVEMENT_TOLERANCE:
-                                # Person moved outside tolerance, reset and re-evaluate segment
-                                person_pos = current_world_pos
-                                closest_segment_idx = get_current_segment_idx(track_id, person_pos)
-                                person_states[track_id]['segment'] = closest_segment_idx
-                                person_states[track_id]['origin_cell'] = current_cell
-                                person_states[track_id]['still_since'] = current_time_for_state
-                                person_states[track_id]['osc_sent'] = False
-                                person_states[track_id]['sticky_cell'] = current_cell
-                                # Reset position samples when person moves
-                                person_states[track_id]['position_samples'] = [current_world_pos]
-                                person_states[track_id]['position_sample_times'] = [current_time_for_state]
-                            else:
                                 # Person has not moved, add position sample
                                 person_states[track_id]['position_samples'].append(current_world_pos)
                                 person_states[track_id]['position_sample_times'].append(current_time_for_state)
@@ -1147,24 +1148,10 @@ try:
                                 if args.orientation_tracking:
                                      get_current_segment_idx(track_id, current_world_pos)
 
-                                # Sticky cell logic for minor drifts
-                                if current_cell != person_states[track_id]['sticky_cell']:
-                                    if person_states[track_id].get('sticky_candidate') == current_cell:
-                                        if current_time_for_state - person_states[track_id].get('sticky_candidate_since', current_time_for_state) > STICKY_CELL_DURATION:
-                                            person_states[track_id]['sticky_cell'] = current_cell
-                                            person_states[track_id]['sticky_since'] = current_time_for_state
-                                            person_states[track_id].pop('sticky_candidate', None)
-                                            person_states[track_id].pop('sticky_candidate_since', None)
-                                    else:
-                                        person_states[track_id]['sticky_candidate'] = current_cell
-                                        person_states[track_id]['sticky_candidate_since'] = current_time_for_state
-                                else:
-                                    person_states[track_id].pop('sticky_candidate', None)
-                                    person_states[track_id].pop('sticky_candidate_since', None)
+                                # Remove sticky cell logic since we're using distance-based tracking
 
-                        person_states[track_id]['current_cell'] = current_cell
+                        person_states[track_id]['current_position'] = current_world_pos
                         person_states[track_id]['last_seen'] = current_time_for_state
-                        
                         
                         # --- Visualization & Stillness Logic ---
                         is_still = (current_time_for_state - person_states[track_id]['still_since']) > STILLNESS_DURATION
@@ -1190,20 +1177,25 @@ try:
                                 person_states[track_id]['averaged_position'] = averaged_position
                             
                             still_segments.add(person_states[track_id]['segment'])
-                            still_cells.add(current_cell)
+                            still_cells.add((grid_x, grid_y))  # Keep for visualization only
                         
                         # Draw info on the frame for all modes when window is visible
                         if show_window:
                             current_segment = person_states[track_id].get('segment')
                             if current_segment is not None:
                                 viz_color = (0, 255, 0) if is_still else (0, 255, 255)
-                                # Show both current and averaged position info when still
+                                # Show movement distance and averaged position info when still
+                                origin_pos = person_states[track_id]['origin_position']
+                                movement_dist = math.hypot(
+                                    current_world_pos[0] - origin_pos[0], 
+                                    current_world_pos[1] - origin_pos[1]
+                                )
                                 if is_still and 'averaged_position' in person_states[track_id]:
                                     avg_pos = person_states[track_id]['averaged_position']
                                     num_samples = len(person_states[track_id]['position_samples'])
-                                    label = f"ID {track_id}: seg {current_segment+1} @ {distance_m:.2f}m (avg: {avg_pos[0]:.2f},{avg_pos[1]:.2f}, n={num_samples})"
+                                    label = f"ID {track_id}: seg {current_segment+1} @ {adjusted_distance:.2f}m (moved: {movement_dist:.2f}m, avg: {avg_pos[0]:.2f},{avg_pos[1]:.2f}, n={num_samples})"
                                 else:
-                                    label = f"ID {track_id}: seg {current_segment+1} @ {distance_m:.2f}m"
+                                    label = f"ID {track_id}: seg {current_segment+1} @ {adjusted_distance:.2f}m (moved: {movement_dist:.2f}m)"
                                 cv2.putText(annotated_frame, label, (x1, y1 - 10),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
                                 cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
@@ -1247,11 +1239,8 @@ try:
                         if 'averaged_position' in state:
                             person_pos = state['averaged_position']
                         else:
-                            current_cell = state.get('current_cell')
-                            if current_cell is not None:
-                                person_pos = (current_cell[0] + 0.5, current_cell[1] + 0.5)  # Center of grid cell
-                            else:
-                                continue
+                            person_pos = state.get('current_position', (0, 0))
+                            continue
                         
                         # Get all segments within cone
                         segments_in_cone = get_all_walls_in_cone(person_pos, facing_vec, WALL_SEGMENTS, top_n=args.top_n_segments)
