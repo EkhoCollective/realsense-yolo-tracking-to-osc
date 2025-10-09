@@ -46,6 +46,7 @@ parser.add_argument("--max-distance", type=float, default=float('inf'), help="Ma
 parser.add_argument("--decouple-segments", type=str, default="", help="Comma-separated list of segment indices to decouple (0-based indexing)")
 parser.add_argument("--decouple-min-distance", type=float, default=0.0, help="Minimum distance (in meters) for decoupled segments")
 parser.add_argument("--decouple-max-distance", type=float, default=3.0, help="Maximum distance (in meters) for decoupled segments")
+parser.add_argument("--decouple-forget-time", type=float, default=5.0, help="Time (in seconds) to forget a decoupled segment after person leaves range")
 
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
@@ -91,6 +92,10 @@ if args.decouple_segments:
     except ValueError:
         print("[ERROR] Invalid decouple-segments format. Use comma-separated integers.")
         exit(1)
+
+# Add tracking for decoupled segment states
+decoupled_segment_states = {}  # {segment_idx: {'last_triggered': timestamp, 'is_active': bool}}
+
 # --- 1. RealSense Setup ---
 if args.replay_path:
     # In replay mode, we don't need the pipeline at all
@@ -1081,6 +1086,9 @@ try:
         if args.orientation_tracking and pose_model is not None:
             pose_results = pose_model.predict(color_image, conf=args.conf, imgsz=imgsz, verbose=False)
 
+        # --- Track which decoupled segments are currently triggered ---
+        current_triggered_decoupled = set()
+
         # --- Annotation and Visualization ---
         # This part runs only if the window is supposed to be shown
         if show_window:
@@ -1166,6 +1174,10 @@ try:
                         grid_x = math.floor(rotated_x)
                         grid_y = math.floor(rotated_y)
                         current_frame_grid_cells.add((grid_x, grid_y))
+
+                        # --- Check if person triggers any decoupled segments ---
+                        triggered_decoupled = get_all_decoupled_segments_in_range(current_world_pos)
+                        current_triggered_decoupled.update(triggered_decoupled)
 
                         # Helper function to get segment index to avoid code repetition
                         def get_current_segment_idx(track_id, person_pos):
@@ -1337,8 +1349,31 @@ try:
                                 cv2.circle(annotated_frame, (cx, cy), 5, (128, 128, 128), -1)
 
 
-        # --- Timed OSC Sending & Visualization ---
+        # --- Update decoupled segment states ---
         current_time = time.time()
+        
+        # Mark currently triggered segments as active
+        for seg_idx in current_triggered_decoupled:
+            if seg_idx not in decoupled_segment_states:
+                decoupled_segment_states[seg_idx] = {'last_triggered': current_time, 'is_active': True}
+            else:
+                decoupled_segment_states[seg_idx]['last_triggered'] = current_time
+                decoupled_segment_states[seg_idx]['is_active'] = True
+
+        # Check for segments that should be forgotten
+        segments_to_remove = []
+        for seg_idx, state in decoupled_segment_states.items():
+            time_since_triggered = current_time - state['last_triggered']
+            if time_since_triggered > args.decouple_forget_time:
+                state['is_active'] = False
+                # Remove from tracking after forget time
+                if time_since_triggered > args.decouple_forget_time + 1.0:  # Give extra second before cleanup
+                    segments_to_remove.append(seg_idx)
+        
+        for seg_idx in segments_to_remove:
+            del decoupled_segment_states[seg_idx]
+
+        # --- Timed OSC Sending & Visualization ---
         if current_time - last_osc_send_time > OSC_SEND_INTERVAL:
             # --- Handle Occlusion and State Cleanup ---
             # Check for people who are still and those who are occluded but within forgiveness period
@@ -1406,6 +1441,7 @@ try:
                             still_segments.add(state['segment'])
                         
                         # Additionally check all decoupled segments for still people
+
                         if 'averaged_position' in state:
                             person_pos = state['averaged_position']
                         else:
@@ -1414,6 +1450,11 @@ try:
                         
                         decoupled_segments = get_all_decoupled_segments_in_range(person_pos)
                         still_segments.update(decoupled_segments)
+
+            # Also add any active decoupled segments that are still within their forget time
+            for seg_idx, state in decoupled_segment_states.items():
+                if state['is_active']:
+                    still_segments.add(seg_idx)
 
             osc_list = [1 if idx in still_segments else 0 for idx in range(WALL_IDX_OFFSET, NUM_SEGMENTS)]
             
