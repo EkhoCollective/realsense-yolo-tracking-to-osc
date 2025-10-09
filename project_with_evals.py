@@ -20,7 +20,7 @@ parser.add_argument("--conf", type=float, default=0.4, help="YOLO detection conf
 parser.add_argument("--no-video", action="store_true", help="Run in headless mode without video output.")
 parser.add_argument("--stillness", type=float, default=5.0, help="How long a person must be still (in seconds)")
 parser.add_argument("--tilt", type=float, default=50, help="Camera tilt angle in degrees")
-parser.add_argument("--tolerance", type=float, default=1.0, help="Movement tolerance in meters for stillness detection")
+parser.add_argument("--tolerance", type=int, default=1, help="Grid cell movement tolerance for stillness")
 parser.add_argument("--rgb-exposure", type=int, default=1000, help="RGB camera exposure value (-1 for auto)")
 parser.add_argument("--yaw", type=float, default=-0, help="Camera yaw angle in degrees (positive = right)")
 parser.add_argument("--rs-width", type=int, default=640, help="RealSense stream width in pixels")
@@ -43,9 +43,6 @@ parser.add_argument("--project-all", action="store_true", help="Project to all w
 parser.add_argument("--head-to-center-offset", type=float, default=0.0, help="Meters to add to depth to approximate center of mass from head position")
 parser.add_argument("--min-distance", type=float, default=0.0, help="Minimum distance (in meters) from wall segment to assign a person")
 parser.add_argument("--max-distance", type=float, default=float('inf'), help="Maximum distance (in meters) from wall segment to assign a person")
-parser.add_argument("--decouple-segment", type=int, action="append", help="Segment index to decouple (can be used multiple times)")
-parser.add_argument("--decouple-min-distance", type=float, default=0.0, help="Minimum distance for decoupled segments")
-parser.add_argument("--decouple-max-distance", type=float, default=float('inf'), help="Maximum distance for decoupled segments")
 
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
@@ -474,7 +471,6 @@ def draw_grid_visualization(occupied_cells):
 # --- Wall Definition ---
 # Wall: straight from (-3, 11) to (-3, 12.5), then quadratic curve to (0, 14)
 NUM_SEGMENTS = args.num_segments
-DECOUPLED_SEGMENTS = set(args.decouple_segment) if args.decouple_segment else set()
 
 
 def calibrate_wall_points(pipeline, align, avg_duration=1.0):
@@ -537,30 +533,6 @@ def calibrate_wall_points(pipeline, align, avg_duration=1.0):
             print(f"[INFO] Saved {len(world_points)} wall points to wall_calibration.npz")
             break
     cv2.destroyWindow("Calibrate Wall")
-
-def is_within_decouple_distance(person_pos, segment_idx, wall_segments):
-    """
-    Check if person is within decoupled segment distance thresholds.
-    """
-    if segment_idx >= len(wall_segments):
-        return False
-    
-    wx, wy = wall_segments[segment_idx]
-    if wx is None or wy is None:
-        return False
-    
-    dist = math.hypot(person_pos[0] - wx, person_pos[1] - wy)
-    return args.decouple_min_distance <= dist <= args.decouple_max_distance
-
-def get_decoupled_segments_for_person(person_pos, wall_segments, decoupled_indices):
-    """
-    Returns list of decoupled segment indices that the person activates.
-    """
-    activated_decoupled = []
-    for seg_idx in decoupled_indices:
-        if is_within_decouple_distance(person_pos, seg_idx, wall_segments):
-            activated_decoupled.append(seg_idx)
-    return activated_decoupled
 
 if args.calibrate_wall:
     calibrate_wall_points(pipeline, align)
@@ -1129,19 +1101,9 @@ try:
                             point_3d = depth_intrinsics.deproject([cx, cy], distance_m)
                         else:
                             point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], distance_m)
-                        
-                        # Simplified floor projection - the camera is tilted down, so we need to
-                        # project the 3D point onto the floor plane correctly
-                        camera_x = point_3d[0] + CAMERA_X_OFFSET_M  # X with offset
-                        camera_y = point_3d[1]  # Y relative to camera
-                        camera_z = point_3d[2]  # Distance from camera
-                        
-                        # For a downward-tilted camera, the floor coordinates are:
-                        # The Z distance from camera directly maps to floor Y distance
-                        floor_x = camera_x
-                        floor_y = camera_z  # Direct mapping since camera looks down at floor
-                        
-                        # Apply yaw rotation
+                        vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
+                        floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+                        floor_x = point_3d[0] + CAMERA_X_OFFSET_M
                         rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
                         rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
                         grid_x = math.floor(rotated_x)
@@ -1158,16 +1120,9 @@ try:
                             point_3d = depth_intrinsics.deproject([cx, cy], adjusted_distance)
                         else:
                             point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], adjusted_distance)
-                        
-                        # Simplified floor projection
-                        camera_x = point_3d[0] + CAMERA_X_OFFSET_M
-                        camera_y = point_3d[1]
-                        camera_z = point_3d[2]
-                        
-                        floor_x = camera_x
-                        floor_y = camera_z  # Direct mapping for downward-looking camera
-                        
-                        # Apply yaw rotation
+                        vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
+                        floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+                        floor_x = point_3d[0] + CAMERA_X_OFFSET_M
                         rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
                         rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
                         
@@ -1216,25 +1171,21 @@ try:
                             person_pos = current_world_pos
                             closest_segment_idx = get_current_segment_idx(track_id, person_pos)
 
-                            # Check decoupled segments
-                            activated_decoupled = get_decoupled_segments_for_person(person_pos, WALL_SEGMENTS, DECOUPLED_SEGMENTS)
-
-                            # Only create person state if they have a valid segment assignment OR activate decoupled segments
-                            if closest_segment_idx is not None or activated_decoupled:
+                            # Only create person state if they have a valid segment assignment
+                            if closest_segment_idx is not None:
                                 person_states[track_id] = {
                                     'origin_position': current_world_pos,  # Store actual world position instead of grid cell
                                     'current_position': current_world_pos,
                                     'still_since': current_time_for_state,
                                     'osc_sent': False,
                                     'segment': closest_segment_idx,
-                                    'decoupled_segments': activated_decoupled,
                                     'facing_vec': None,
                                     'last_seen': current_time_for_state,
                                     'position_samples': [current_world_pos],
                                     'position_sample_times': [current_time_for_state]
                                 }
                             else:
-                                print(f"[INFO] Person ID {track_id} is outside distance limits for all segments, not tracking.")
+                                print(f"[INFO] Person ID {track_id} is outside distance limits ({args.min_distance}m - {args.max_distance}m), not tracking.")
                         else:
                             # Existing person, check movement
                             origin_pos = person_states[track_id]['origin_position']
@@ -1244,15 +1195,13 @@ try:
                             )
                             
                             if distance_moved > args.tolerance:
-                                # Person moved outside tolerance, reset and re-evaluate segments
+                                # Person moved outside tolerance, reset and re-evaluate segment
                                 person_pos = current_world_pos
                                 closest_segment_idx = get_current_segment_idx(track_id, person_pos)
-                                activated_decoupled = get_decoupled_segments_for_person(person_pos, WALL_SEGMENTS, DECOUPLED_SEGMENTS)
                                 
-                                # Only update if person has a valid segment assignment OR activates decoupled segments
-                                if closest_segment_idx is not None or activated_decoupled:
+                                # Only update if person has a valid segment assignment
+                                if closest_segment_idx is not None:
                                     person_states[track_id]['segment'] = closest_segment_idx
-                                    person_states[track_id]['decoupled_segments'] = activated_decoupled
                                     person_states[track_id]['origin_position'] = current_world_pos
                                     person_states[track_id]['still_since'] = current_time_for_state
                                     person_states[track_id]['osc_sent'] = False
@@ -1260,19 +1209,15 @@ try:
                                     person_states[track_id]['position_samples'] = [current_world_pos]
                                     person_states[track_id]['position_sample_times'] = [current_time_for_state]
                                 else:
-                                    print(f"[INFO] Person ID {track_id} moved outside distance limits for all segments, removing from tracking.")
+                                    print(f"[INFO] Person ID {track_id} moved outside distance limits, removing from tracking.")
                                     # Remove person from tracking
                                     if track_id in person_states:
                                         del person_states[track_id]
                                     continue
                             else:
-                                # Person has not moved, add position sample and update decoupled segments
+                                # Person has not moved, add position sample
                                 person_states[track_id]['position_samples'].append(current_world_pos)
                                 person_states[track_id]['position_sample_times'].append(current_time_for_state)
-                                
-                                # Update decoupled segments based on current position
-                                activated_decoupled = get_decoupled_segments_for_person(current_world_pos, WALL_SEGMENTS, DECOUPLED_SEGMENTS)
-                                person_states[track_id]['decoupled_segments'] = activated_decoupled
                                 
                                 # Clean up old samples (keep only samples from the stillness duration window)
                                 cutoff_time = current_time_for_state - STILLNESS_DURATION
@@ -1320,9 +1265,7 @@ try:
                             # Draw info on the frame for all modes when window is visible
                             if show_window:
                                 current_segment = person_states[track_id].get('segment')
-                                decoupled_segs = person_states[track_id].get('decoupled_segments', [])
-                                
-                                if current_segment is not None or decoupled_segs:
+                                if current_segment is not None:
                                     viz_color = (0, 255, 0) if is_still else (0, 255, 255)
                                     # Show movement distance and averaged position info when still
                                     origin_pos = person_states[track_id]['origin_position']
@@ -1330,36 +1273,23 @@ try:
                                         current_world_pos[0] - origin_pos[0], 
                                         current_world_pos[1] - origin_pos[1]
                                     )
-                                    
-                                    # Build label with regular and decoupled segment info
-                                    label_parts = []
-                                    if current_segment is not None:
-                                        seg_x, seg_y = WALL_SEGMENTS[current_segment]
-                                        seg_dist = math.hypot(current_world_pos[0] - seg_x, current_world_pos[1] - seg_y)
-                                        label_parts.append(f"seg {current_segment+1} (dist: {seg_dist:.2f}m)")
-                                    
-                                    if decoupled_segs:
-                                        decouple_info = []
-                                        for dseg in decoupled_segs:
-                                            seg_x, seg_y = WALL_SEGMENTS[dseg]
-                                            seg_dist = math.hypot(current_world_pos[0] - seg_x, current_world_pos[1] - seg_y)
-                                            decouple_info.append(f"D{dseg+1}({seg_dist:.2f}m)")
-                                        label_parts.append(f"decoupled: {','.join(decouple_info)}")
+                                    # Calculate distance to assigned segment
+                                    seg_x, seg_y = WALL_SEGMENTS[current_segment]
+                                    seg_dist = math.hypot(current_world_pos[0] - seg_x, current_world_pos[1] - seg_y)
                                     
                                     if is_still and 'averaged_position' in person_states[track_id]:
                                         avg_pos = person_states[track_id]['averaged_position']
                                         num_samples = len(person_states[track_id]['position_samples'])
-                                        label = f"ID {track_id}: {' | '.join(label_parts)} @ {adjusted_distance:.2f}m (moved: {movement_dist:.2f}m, avg: {avg_pos[0]:.2f},{avg_pos[1]:.2f}, n={num_samples})"
+                                        label = f"ID {track_id}: seg {current_segment+1} @ {adjusted_distance:.2f}m (dist: {seg_dist:.2f}m, moved: {movement_dist:.2f}m, avg: {avg_pos[0]:.2f},{avg_pos[1]:.2f}, n={num_samples})"
                                     else:
-                                        label = f"ID {track_id}: {' | '.join(label_parts)} @ {adjusted_distance:.2f}m (moved: {movement_dist:.2f}m)"
-                                    
+                                        label = f"ID {track_id}: seg {current_segment+1} @ {adjusted_distance:.2f}m (dist: {seg_dist:.2f}m, moved: {movement_dist:.2f}m)"
                                     cv2.putText(annotated_frame, label, (x1, y1 - 10),
                                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
                                     cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
                                 else:
                                     # Person has no valid segment assignment
                                     viz_color = (128, 128, 128)  # Gray color for unassigned
-                                    label = f"ID {track_id}: NO SEGMENT (outside distance ranges)"
+                                    label = f"ID {track_id}: NO SEGMENT (outside {args.min_distance}m-{args.max_distance}m range)"
                                     cv2.putText(annotated_frame, label, (x1, y1 - 10),
                                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
                                     cv2.circle(annotated_frame, (cx, cy), 5, (128, 128, 128), -1)
@@ -1367,11 +1297,10 @@ try:
                             # Person was not added to tracking (outside distance limits), show gray visualization
                             if show_window:
                                 viz_color = (128, 128, 128)  # Gray color for unassigned
-                                label = f"ID {track_id}: NOT TRACKED (outside distance ranges)"
+                                label = f"ID {track_id}: NOT TRACKED (outside {args.min_distance}m-{args.max_distance}m range)"
                                 cv2.putText(annotated_frame, label, (x1, y1 - 10),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, viz_color, 2)
                                 cv2.circle(annotated_frame, (cx, cy), 5, (128, 128, 128), -1)
-
 
 
         # --- Timed OSC Sending & Visualization ---
@@ -1400,9 +1329,8 @@ try:
             still_segments.clear() # Clear before recalculating
             
             if args.project_all:
-                # Project-all mode: collect all segments within any person's cone + decoupled segments
+                # Project-all mode: collect all segments within any person's cone
                 for tid, state in person_states.items():
-                    # Handle regular segments
                     facing_vec = state.get('facing_vec')
                     if facing_vec is None:
                         # Fallback to single closest segment
@@ -1420,22 +1348,12 @@ try:
                         # Get all segments within cone
                         segments_in_cone = get_all_walls_in_cone(person_pos, facing_vec, WALL_SEGMENTS, top_n=args.top_n_segments)
                         still_segments.update(segments_in_cone)
-                    
-                    # Handle decoupled segments (always active if person is within range)
-                    decoupled_segs = state.get('decoupled_segments', [])
-                    still_segments.update(decoupled_segs)
             else:
-                # Normal mode: only segments where people are still + active decoupled segments
+                # Normal mode: only segments where people are still
                 for tid, state in person_states.items():
                     is_still = (current_time - state['still_since']) > STILLNESS_DURATION
-                    
-                    # Regular segments only activate when still
-                    if is_still and state.get('segment') is not None:
+                    if is_still:
                         still_segments.add(state['segment'])
-                    
-                    # Decoupled segments activate immediately when person is in range
-                    decoupled_segs = state.get('decoupled_segments', [])
-                    still_segments.update(decoupled_segs)
 
             osc_list = [1 if idx in still_segments else 0 for idx in range(WALL_IDX_OFFSET, NUM_SEGMENTS)]
             
