@@ -1101,19 +1101,9 @@ try:
                             point_3d = depth_intrinsics.deproject([cx, cy], distance_m)
                         else:
                             point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], distance_m)
-                        
-                        # Simplified floor projection - the camera is tilted down, so we need to
-                        # project the 3D point onto the floor plane correctly
-                        camera_x = point_3d[0] + CAMERA_X_OFFSET_M  # X with offset
-                        camera_y = point_3d[1]  # Y relative to camera
-                        camera_z = point_3d[2]  # Distance from camera
-                        
-                        # For a downward-tilted camera, the floor coordinates are:
-                        # The Z distance from camera directly maps to floor Y distance
-                        floor_x = camera_x
-                        floor_y = camera_z  # Direct mapping since camera looks down at floor
-                        
-                        # Apply yaw rotation
+                        vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
+                        floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+                        floor_x = point_3d[0] + CAMERA_X_OFFSET_M
                         rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
                         rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
                         grid_x = math.floor(rotated_x)
@@ -1130,16 +1120,9 @@ try:
                             point_3d = depth_intrinsics.deproject([cx, cy], adjusted_distance)
                         else:
                             point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [cx, cy], adjusted_distance)
-                        
-                        # Simplified floor projection
-                        camera_x = point_3d[0] + CAMERA_X_OFFSET_M
-                        camera_y = point_3d[1]
-                        camera_z = point_3d[2]
-                        
-                        floor_x = camera_x
-                        floor_y = camera_z  # Direct mapping for downward-looking camera
-                        
-                        # Apply yaw rotation
+                        vertical_distance = CAMERA_HEIGHT_M - point_3d[1]
+                        floor_y = vertical_distance * math.tan(CAMERA_TILT_RADIANS) + point_3d[2] * math.cos(CAMERA_TILT_RADIANS)
+                        floor_x = point_3d[0] + CAMERA_X_OFFSET_M
                         rotated_x = floor_x * math.cos(CAMERA_YAW_RADIANS) - floor_y * math.sin(CAMERA_YAW_RADIANS)
                         rotated_y = floor_x * math.sin(CAMERA_YAW_RADIANS) + floor_y * math.cos(CAMERA_YAW_RADIANS)
                         
