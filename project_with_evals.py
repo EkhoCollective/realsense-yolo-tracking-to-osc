@@ -40,6 +40,7 @@ parser.add_argument("--occlusion-forgiveness", type=float, default=3.0, help="Se
 parser.add_argument("--top-n-segments", type=int, default=3, help="Number of closest segments to consider before applying orientation filter")
 parser.add_argument("--reverse-osc", action="store_true", help="Reverse OSC signal (0 becomes 1, 1 becomes 0)")
 parser.add_argument("--project-all", action="store_true", help="Project to all wall segments within any vision cone (ignores stillness)")
+parser.add_argument("--head-to-center-offset", type=float, default=0.0, help="Meters to add to depth to approximate center of mass from head position")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
