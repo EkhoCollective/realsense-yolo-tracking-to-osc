@@ -43,6 +43,9 @@ parser.add_argument("--project-all", action="store_true", help="Project to all w
 parser.add_argument("--head-to-center-offset", type=float, default=0.0, help="Meters to add to depth to approximate center of mass from head position")
 parser.add_argument("--min-distance", type=float, default=0.0, help="Minimum distance (in meters) from wall segment to assign a person")
 parser.add_argument("--max-distance", type=float, default=float('inf'), help="Maximum distance (in meters) from wall segment to assign a person")
+parser.add_argument("--decouple-segments", type=str, default="", help="Comma-separated list of segment indices to decouple (0-based indexing)")
+parser.add_argument("--decouple-min-distance", type=float, default=0.0, help="Minimum distance (in meters) for decoupled segments")
+parser.add_argument("--decouple-max-distance", type=float, default=3.0, help="Maximum distance (in meters) for decoupled segments")
 
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
@@ -78,6 +81,16 @@ GRID_ORIGIN_OFFSET = GRID_DIM_METERS // 2 # To center (0,0) in the visualization
 STICKY_CELL_DURATION = 0.5 # seconds
 
 WALL_IDX_OFFSET = args.wall_idx_offset
+
+# Parse decoupled segments
+DECOUPLED_SEGMENTS = set()
+if args.decouple_segments:
+    try:
+        DECOUPLED_SEGMENTS = set(int(x.strip()) for x in args.decouple_segments.split(',') if x.strip())
+        print(f"[INFO] Decoupled segments: {sorted(DECOUPLED_SEGMENTS)}")
+    except ValueError:
+        print("[ERROR] Invalid decouple-segments format. Use comma-separated integers.")
+        exit(1)
 # --- 1. RealSense Setup ---
 if args.replay_path:
     # In replay mode, we don't need the pipeline at all
@@ -658,10 +671,31 @@ def closest_wall_segment(px, py):
             min_idx = idx
     
     # Check if the closest segment is within our distance requirements
-    if min_idx is not None and args.min_distance <= min_dist <= args.max_distance:
-        return min_idx
-    else:
-        return None  # Person is too close, too far, or no valid segments found
+    if min_idx is not None:
+        if min_idx in DECOUPLED_SEGMENTS:
+            min_distance = args.decouple_min_distance
+            max_distance = args.decouple_max_distance
+        else:
+            min_distance = args.min_distance
+            max_distance = args.max_distance
+        
+        if min_distance <= min_dist <= max_distance:
+            return min_idx
+    
+    return None  # Person is too close, too far, or no valid segments found
+
+
+def get_all_decoupled_segments_in_range(person_pos):
+    """Returns all decoupled segments within their specific distance range."""
+    active_decoupled = []
+    for idx in DECOUPLED_SEGMENTS:
+        if idx < len(WALL_SEGMENTS):
+            wx, wy = WALL_SEGMENTS[idx]
+            if wx is not None and wy is not None:
+                dist = math.hypot(person_pos[0] - wx, person_pos[1] - wy)
+                if args.decouple_min_distance <= dist <= args.decouple_max_distance:
+                    active_decoupled.append(idx)
+    return active_decoupled
 
 def draw_wall_visualization(occupied_segments):
     """Draws rectangles for wall segments, all with equal pixel width."""
@@ -1337,6 +1371,16 @@ try:
                         segment_idx = state.get('segment')
                         if segment_idx is not None:
                             still_segments.add(segment_idx)
+                        
+                        # Also check decoupled segments
+                        if 'averaged_position' in state:
+                            person_pos = state['averaged_position']
+                        else:
+                            person_pos = state.get('current_position', (0, 0))
+                            continue
+                        
+                        decoupled_segments = get_all_decoupled_segments_in_range(person_pos)
+                        still_segments.update(decoupled_segments)
                     else:
                         # Use averaged position if available, otherwise current position
                         if 'averaged_position' in state:
@@ -1348,12 +1392,28 @@ try:
                         # Get all segments within cone
                         segments_in_cone = get_all_walls_in_cone(person_pos, facing_vec, WALL_SEGMENTS, top_n=args.top_n_segments)
                         still_segments.update(segments_in_cone)
+                        
+                        # Additionally check all decoupled segments regardless of cone
+                        decoupled_segments = get_all_decoupled_segments_in_range(person_pos)
+                        still_segments.update(decoupled_segments)
             else:
                 # Normal mode: only segments where people are still
                 for tid, state in person_states.items():
                     is_still = (current_time - state['still_since']) > STILLNESS_DURATION
                     if is_still:
-                        still_segments.add(state['segment'])
+                        # Add the main assigned segment
+                        if state.get('segment') is not None:
+                            still_segments.add(state['segment'])
+                        
+                        # Additionally check all decoupled segments for still people
+                        if 'averaged_position' in state:
+                            person_pos = state['averaged_position']
+                        else:
+                            person_pos = state.get('current_position', (0, 0))
+                            continue
+                        
+                        decoupled_segments = get_all_decoupled_segments_in_range(person_pos)
+                        still_segments.update(decoupled_segments)
 
             osc_list = [1 if idx in still_segments else 0 for idx in range(WALL_IDX_OFFSET, NUM_SEGMENTS)]
             
