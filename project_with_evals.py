@@ -691,6 +691,20 @@ def closest_wall_segment(px, py):
     else:
         return None  # Person is too close, too far, or no valid segments found
 
+def closest_wall_segment_decoupled(px, py, decoupled_indices):
+    """Returns list of decoupled segment indices that the person is within range of."""
+    activated_decoupled = []
+    for idx in decoupled_indices:
+        if idx >= len(WALL_SEGMENTS):
+            continue
+        wx, wy = WALL_SEGMENTS[idx]
+        if wx is None or wy is None:
+            continue
+        dist = math.hypot(px - wx, py - wy)
+        if args.decouple_min_distance <= dist <= args.decouple_max_distance:
+            activated_decoupled.append(idx)
+    return activated_decoupled
+
 def draw_wall_visualization(occupied_segments):
     """Draws rectangles for wall segments, all with equal pixel width."""
     start_idx = WALL_IDX_OFFSET
@@ -1216,8 +1230,8 @@ try:
                             person_pos = current_world_pos
                             closest_segment_idx = get_current_segment_idx(track_id, person_pos)
 
-                            # Check decoupled segments
-                            activated_decoupled = get_decoupled_segments_for_person(person_pos, WALL_SEGMENTS, DECOUPLED_SEGMENTS)
+                            # Check decoupled segments using the same distance calculation but different thresholds
+                            activated_decoupled = closest_wall_segment_decoupled(person_pos[0], person_pos[1], DECOUPLED_SEGMENTS)
 
                             # Only create person state if they have a valid segment assignment OR activate decoupled segments
                             if closest_segment_idx is not None or activated_decoupled:
@@ -1233,6 +1247,7 @@ try:
                                     'position_samples': [current_world_pos],
                                     'position_sample_times': [current_time_for_state]
                                 }
+                                print(f"[INFO] Person ID {track_id} assigned to segment {closest_segment_idx}, decoupled: {activated_decoupled}")
                             else:
                                 print(f"[INFO] Person ID {track_id} is outside distance limits for all segments, not tracking.")
                         else:
@@ -1247,7 +1262,7 @@ try:
                                 # Person moved outside tolerance, reset and re-evaluate segments
                                 person_pos = current_world_pos
                                 closest_segment_idx = get_current_segment_idx(track_id, person_pos)
-                                activated_decoupled = get_decoupled_segments_for_person(person_pos, WALL_SEGMENTS, DECOUPLED_SEGMENTS)
+                                activated_decoupled = closest_wall_segment_decoupled(person_pos[0], person_pos[1], DECOUPLED_SEGMENTS)
                                 
                                 # Only update if person has a valid segment assignment OR activates decoupled segments
                                 if closest_segment_idx is not None or activated_decoupled:
@@ -1271,7 +1286,7 @@ try:
                                 person_states[track_id]['position_sample_times'].append(current_time_for_state)
                                 
                                 # Update decoupled segments based on current position
-                                activated_decoupled = get_decoupled_segments_for_person(current_world_pos, WALL_SEGMENTS, DECOUPLED_SEGMENTS)
+                                activated_decoupled = closest_wall_segment_decoupled(current_world_pos[0], current_world_pos[1], DECOUPLED_SEGMENTS)
                                 person_states[track_id]['decoupled_segments'] = activated_decoupled
                                 
                                 # Clean up old samples (keep only samples from the stillness duration window)
