@@ -20,7 +20,7 @@ parser.add_argument("--conf", type=float, default=0.4, help="YOLO detection conf
 parser.add_argument("--no-video", action="store_true", help="Run in headless mode without video output.")
 parser.add_argument("--stillness", type=float, default=5.0, help="How long a person must be still (in seconds)")
 parser.add_argument("--tilt", type=float, default=50, help="Camera tilt angle in degrees")
-parser.add_argument("--tolerance", type=int, default=1, help="Grid cell movement tolerance for stillness")
+parser.add_argument("--tolerance", type=float, default=1.0, help="Movement tolerance in meters for stillness detection")
 parser.add_argument("--rgb-exposure", type=int, default=1000, help="RGB camera exposure value (-1 for auto)")
 parser.add_argument("--yaw", type=float, default=-0, help="Camera yaw angle in degrees (positive = right)")
 parser.add_argument("--rs-width", type=int, default=640, help="RealSense stream width in pixels")
