@@ -1134,6 +1134,25 @@ try:
                                 'position_sample_times': [current_time_for_state]
                             }
                         else:
+                            # Existing person, check if they moved beyond tolerance using absolute distance
+                            origin_pos = person_states[track_id]['origin_position']
+                            distance_moved = math.hypot(
+                                current_world_pos[0] - origin_pos[0], 
+                                current_world_pos[1] - origin_pos[1]
+                            )
+                            
+                            if distance_moved > args.tolerance:
+                                # Person moved outside tolerance, reset and re-evaluate segment
+                                person_pos = current_world_pos
+                                closest_segment_idx = get_current_segment_idx(track_id, person_pos)
+                                person_states[track_id]['segment'] = closest_segment_idx
+                                person_states[track_id]['origin_position'] = current_world_pos
+                                person_states[track_id]['still_since'] = current_time_for_state
+                                person_states[track_id]['osc_sent'] = False
+                                # Reset position samples when person moves
+                                person_states[track_id]['position_samples'] = [current_world_pos]
+                                person_states[track_id]['position_sample_times'] = [current_time_for_state]
+                            else:
                                 # Person has not moved, add position sample
                                 person_states[track_id]['position_samples'].append(current_world_pos)
                                 person_states[track_id]['position_sample_times'].append(current_time_for_state)
