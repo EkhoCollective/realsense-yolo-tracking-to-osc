@@ -47,7 +47,7 @@ parser.add_argument("--decouple-segments", type=str, default="", help="Comma-sep
 parser.add_argument("--decouple-min-distance", type=float, default=0.0, help="Minimum distance (in meters) for decoupled segments")
 parser.add_argument("--decouple-max-distance", type=float, default=3.0, help="Maximum distance (in meters) for decoupled segments")
 parser.add_argument("--decouple-forget-time", type=float, default=5.0, help="Time (in seconds) to forget a decoupled segment after person leaves range")
-
+parser.add_argument("--decouple-zones", type=str, default="", help="Distance zones for decoupled segments in format 'seg1:min1-max1,min2-max2;seg2:min1-max1' etc.")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -85,12 +85,50 @@ WALL_IDX_OFFSET = args.wall_idx_offset
 
 # Parse decoupled segments
 DECOUPLED_SEGMENTS = set()
+DECOUPLED_ZONES = {}  # {segment_idx: [(min_dist, max_dist), ...]}
+
 if args.decouple_segments:
     try:
         DECOUPLED_SEGMENTS = set(int(x.strip()) for x in args.decouple_segments.split(',') if x.strip())
         print(f"[INFO] Decoupled segments: {sorted(DECOUPLED_SEGMENTS)}")
+        
+        # Set default zones for all decoupled segments
+        for seg_idx in DECOUPLED_SEGMENTS:
+            DECOUPLED_ZONES[seg_idx] = [(args.decouple_min_distance, args.decouple_max_distance)]
+            
     except ValueError:
         print("[ERROR] Invalid decouple-segments format. Use comma-separated integers.")
+        exit(1)
+
+# Parse custom zones if provided
+if args.decouple_zones:
+    try:
+        # Format: "seg1:min1-max1,min2-max2;seg2:min1-max1"
+        segment_configs = args.decouple_zones.split(';')
+        for config in segment_configs:
+            if ':' not in config:
+                continue
+            seg_part, zones_part = config.split(':', 1)
+            seg_idx = int(seg_part.strip())
+            
+            # Parse zones: "min1-max1,min2-max2"
+            zone_strings = zones_part.split(',')
+            zones = []
+            for zone_str in zone_strings:
+                if '-' in zone_str:
+                    min_str, max_str = zone_str.split('-', 1)
+                    min_dist = float(min_str.strip())
+                    max_dist = float(max_str.strip())
+                    zones.append((min_dist, max_dist))
+            
+            if zones:
+                DECOUPLED_ZONES[seg_idx] = zones
+                DECOUPLED_SEGMENTS.add(seg_idx)  # Ensure it's in the decoupled set
+                print(f"[INFO] Segment {seg_idx} zones: {zones}")
+                
+    except (ValueError, IndexError) as e:
+        print(f"[ERROR] Invalid decouple-zones format: {e}")
+        print("[ERROR] Use format like '0:0.5-1.5,2.0-3.0;1:1.0-2.0'")
         exit(1)
 
 # Add tracking for decoupled segment states
@@ -678,28 +716,35 @@ def closest_wall_segment(px, py):
     # Check if the closest segment is within our distance requirements
     if min_idx is not None:
         if min_idx in DECOUPLED_SEGMENTS:
-            min_distance = args.decouple_min_distance
-            max_distance = args.decouple_max_distance
+            # For decoupled segments, check if within any of their zones
+            zones = DECOUPLED_ZONES.get(min_idx, [(args.decouple_min_distance, args.decouple_max_distance)])
+            in_any_zone = any(min_distance <= min_dist <= max_distance for min_distance, max_distance in zones)
+            if in_any_zone:
+                return min_idx
         else:
             min_distance = args.min_distance
             max_distance = args.max_distance
-        
-        if min_distance <= min_dist <= max_distance:
-            return min_idx
+            if min_distance <= min_dist <= max_distance:
+                return min_idx
     
     return None  # Person is too close, too far, or no valid segments found
 
 
 def get_all_decoupled_segments_in_range(person_pos):
-    """Returns all decoupled segments within their specific distance range."""
+    """Returns all decoupled segments within any of their specific distance zones."""
     active_decoupled = []
     for idx in DECOUPLED_SEGMENTS:
         if idx < len(WALL_SEGMENTS):
             wx, wy = WALL_SEGMENTS[idx]
             if wx is not None and wy is not None:
                 dist = math.hypot(person_pos[0] - wx, person_pos[1] - wy)
-                if args.decouple_min_distance <= dist <= args.decouple_max_distance:
-                    active_decoupled.append(idx)
+                
+                # Check if person is within any of the zones for this segment
+                zones = DECOUPLED_ZONES.get(idx, [(args.decouple_min_distance, args.decouple_max_distance)])
+                for min_dist, max_dist in zones:
+                    if min_dist <= dist <= max_dist:
+                        active_decoupled.append(idx)
+                        break  # Found a matching zone, no need to check others
     return active_decoupled
 
 def draw_wall_visualization(occupied_segments):
