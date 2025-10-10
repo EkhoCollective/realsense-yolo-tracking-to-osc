@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 
 # --- Argument Parsing ---
-parser = argparse.ArgumentParser(description="YOLOv8 RealSense Tracker")
+parser = argparse.ArgumentParser(description="YOLOv11 RealSense Tracker")
 parser.add_argument("--ip", default="127.0.0.1", help="OSC server IP")
 parser.add_argument("--port", type=int, default=5005, help="OSC server port")
 parser.add_argument("--height", type=float, default=3.46, help="Camera height in meters")
@@ -48,6 +48,7 @@ parser.add_argument("--decouple-min-distance", type=float, default=0.0, help="Mi
 parser.add_argument("--decouple-max-distance", type=float, default=3.0, help="Maximum distance (in meters) for decoupled segments")
 parser.add_argument("--decouple-forget-time", type=float, default=5.0, help="Time (in seconds) to forget a decoupled segment after person leaves range")
 parser.add_argument("--decouple-zones", type=str, default="", help="Distance zones for decoupled segments in format 'seg1:min1-max1,min2-max2;seg2:min1-max1' etc.")
+parser.add_argument("--eval-file-path", type=str, default="Mock_Tracking_File.csv", help="Path to ground truth evaluation CSV file")
 args = parser.parse_args()
 MOVEMENT_TOLERANCE = args.tolerance
 
@@ -186,7 +187,7 @@ else:
     print("[INFO] Camera ready.")
 
 # --- 2. Model Initialization ---
-# Load the ultra-efficient YOLOv8-L model
+# Load the YOLOv11-L model
 if torch.cuda.is_available():
     print("[INFO] Loading models onto GPU...")
     model = YOLO('yolo11l.pt').cuda()
@@ -974,7 +975,7 @@ person_states = {}
 
 # --- Visualization State ---
 show_window = not args.no_video
-window_name = "YOLOv8 ByteTrack on RealSense"
+window_name = "YOLOv11 ByteTrack on RealSense"
 grid_window_name = "Occupancy Grid"
 
 EXTRA_WALL = args.extra_wall
@@ -1682,7 +1683,7 @@ def seconds_to_mmss(seconds):
     s = int(seconds % 60)
     return f"{m}:{s:02d}"
 
-def evaluate_accuracy(osc_log_path, gt_path="Mock_Tracking_File.csv"):
+def evaluate_accuracy(osc_log_path, gt_path=args.eval_file_path):
     if not os.path.exists(osc_log_path) or not os.path.exists(gt_path):
         print("[WARNING] OSC log or ground truth file not found.")
         return
