@@ -44,13 +44,21 @@ if %CONDA_FOUND%==0 (
 
 REM Activate the existing conda environment
 echo Activating conda environment: %CONDA_ENV_NAME%
-call "%CONDA_ACTIVATE%" "%CONDA_ENV_NAME%"
+call conda activate "%CONDA_ENV_NAME%"
 if errorlevel 1 (
     echo ERROR: Failed to activate conda environment %CONDA_ENV_NAME%
     echo Make sure the environment exists and the name is correct
-    pause
-    exit /b 1
+    echo Trying alternative activation method...
+    
+    REM Alternative method using full path
+    call "%CONDA_BAT%" activate "%CONDA_ENV_NAME%"
+    if errorlevel 1 (
+        echo ERROR: Both activation methods failed
+        pause
+        exit /b 1
+    )
 )
+
 
 REM Verify Python script exists
 if not exist "%PYTHON_SCRIPT%" (
